@@ -434,7 +434,7 @@ def plot_kline(df_kline: pd.DataFrame, stock_name: str = "", days: int | None = 
     fig.update_yaxes(title_text="价格", row=1, col=1)
     fig.update_yaxes(title_text="成交量", row=2, col=1)
 
-    # 缩放到指定天数范围（category 轴用索引）
+    # 确定可见的数据范围并同步调整 y 轴
     if days is not None:
         end_date = df["date"].max()
         start_date = end_date - pd.Timedelta(days=days)
@@ -445,8 +445,18 @@ def plot_kline(df_kline: pd.DataFrame, stock_name: str = "", days: int | None = 
             start_idx = 0
         end_idx = len(df) - 1
         fig.update_xaxes(range=[start_idx, end_idx])
-        # y 轴不固定，让 plotly 根据当前可见的 x 范围自动计算 y 范围
-        fig.update_yaxes(autorange=True, row=1, col=1)
+    else:
+        start_idx, end_idx = 0, len(df) - 1
+
+    # y 轴根据可见区域的最高/最低点自适应（含 3% 边距）
+    visible_df = df.iloc[start_idx:end_idx + 1]
+    y_min = visible_df["low"].min()
+    y_max = visible_df["high"].max()
+    if show_boll:
+        y_min = min(y_min, visible_df["boll_down"].min())
+        y_max = max(y_max, visible_df["boll_up"].max())
+    padding = (y_max - y_min) * 0.03
+    fig.update_yaxes(range=[y_min - padding, y_max + padding], row=1, col=1)
 
     return fig
 
