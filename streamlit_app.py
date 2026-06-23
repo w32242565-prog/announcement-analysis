@@ -286,7 +286,8 @@ def plot_kline(df_kline: pd.DataFrame, stock_name: str = "", days: int | None = 
     if df_kline.empty:
         return go.Figure()
 
-    df = df_kline.copy()
+    df = df_kline.copy().reset_index(drop=True)
+    df["date_str"] = df["date"].dt.strftime("%Y-%m-%d")
     df["ma5"] = df["close"].rolling(window=5).mean()
     df["ma10"] = df["close"].rolling(window=10).mean()
     df["ma20"] = df["close"].rolling(window=20).mean()
@@ -298,6 +299,8 @@ def plot_kline(df_kline: pd.DataFrame, stock_name: str = "", days: int | None = 
     df["boll_up"] = df["boll_mid"] + 2 * df["boll_std"]
     df["boll_down"] = df["boll_mid"] - 2 * df["boll_std"]
 
+    x_vals = df["date_str"].tolist()
+
     fig = make_subplots(
         rows=2, cols=1,
         shared_xaxes=True,
@@ -306,10 +309,10 @@ def plot_kline(df_kline: pd.DataFrame, stock_name: str = "", days: int | None = 
         subplot_titles=(f"{stock_name} K线走势", "成交量"),
     )
 
-    # K线（加粗）
+    # K线
     fig.add_trace(
         go.Candlestick(
-            x=df["date"],
+            x=x_vals,
             open=df["open"],
             high=df["high"],
             low=df["low"],
@@ -327,24 +330,24 @@ def plot_kline(df_kline: pd.DataFrame, stock_name: str = "", days: int | None = 
     if show_ma:
         for col, color, name in [("ma5", "#F59E0B", "MA5"), ("ma10", "#06B6D4", "MA10"), ("ma20", "#3B82F6", "MA20"), ("ma60", "#8B5CF6", "MA60")]:
             fig.add_trace(
-                go.Scatter(x=df["date"], y=df[col], mode="lines", name=name, line=dict(color=color, width=1)),
+                go.Scatter(x=x_vals, y=df[col], mode="lines", name=name, line=dict(color=color, width=1)),
                 row=1, col=1,
             )
 
     # 布林带
     if show_boll:
         fig.add_trace(
-            go.Scatter(x=df["date"], y=df["boll_up"], mode="lines", name="BOLL上轨",
+            go.Scatter(x=x_vals, y=df["boll_up"], mode="lines", name="BOLL上轨",
                        line=dict(color="rgba(128,128,128,0.6)", width=1, dash="dot")),
             row=1, col=1,
         )
         fig.add_trace(
-            go.Scatter(x=df["date"], y=df["boll_mid"], mode="lines", name="BOLL中轨",
+            go.Scatter(x=x_vals, y=df["boll_mid"], mode="lines", name="BOLL中轨",
                        line=dict(color="rgba(128,128,128,0.8)", width=1.5)),
             row=1, col=1,
         )
         fig.add_trace(
-            go.Scatter(x=df["date"], y=df["boll_down"], mode="lines", name="BOLL下轨",
+            go.Scatter(x=x_vals, y=df["boll_down"], mode="lines", name="BOLL下轨",
                        line=dict(color="rgba(128,128,128,0.6)", width=1, dash="dot")),
             row=1, col=1,
         )
@@ -352,34 +355,32 @@ def plot_kline(df_kline: pd.DataFrame, stock_name: str = "", days: int | None = 
     # 成交量颜色
     colors = ["#d32f2f" if c >= o else "#388e3c" for c, o in zip(df["close"], df["open"])]
     fig.add_trace(
-        go.Bar(x=df["date"], y=df["volume"], marker_color=colors, name="成交量", showlegend=False),
+        go.Bar(x=x_vals, y=df["volume"], marker_color=colors, name="成交量", showlegend=False),
         row=2, col=1,
     )
 
-    # 标注旗形（使用数据索引获取对应日期，兼容 category 轴）
+    # 标注旗形（x 统一用字符串日期，与 category 轴完全匹配）
     if show_flags and flags:
         for idx, flag in enumerate(flags):
             is_bull = flag["type"] == "上飘旗"
             color = "rgba(211,47,47,0.15)" if is_bull else "rgba(56,142,60,0.15)"
             line_color = "#d32f2f" if is_bull else "#388e3c"
 
-            # 通过索引获取对应日期（确保与 trace 的 x 值一致）
             ps = flag["pole_start"]
             pe = flag["pole_end"]
             fs = flag["flag_start"]
-            fe = flag["flag_end"] - 1  # flag_end 是右开区间
+            fe = flag["flag_end"] - 1
 
-            date_ps = df["date"].iloc[ps]
-            date_pe = df["date"].iloc[pe]
-            date_fs = df["date"].iloc[fs]
-            date_fe = df["date"].iloc[fe]
-            mid_idx = (fs + fe) // 2
-            mid_date = df["date"].iloc[mid_idx]
+            x_ps = x_vals[ps]
+            x_pe = x_vals[pe]
+            x_fs = x_vals[fs]
+            x_fe = x_vals[fe]
+            x_mid = x_vals[(fs + fe) // 2]
 
             # 旗杆矩形区域
             fig.add_shape(
                 type="rect",
-                x0=date_ps, x1=date_pe,
+                x0=x_ps, x1=x_pe,
                 y0=flag["pole_low"], y1=flag["pole_high"],
                 fillcolor=color,
                 line=dict(width=0),
@@ -390,8 +391,8 @@ def plot_kline(df_kline: pd.DataFrame, stock_name: str = "", days: int | None = 
             # 旗面上轨
             fig.add_shape(
                 type="line",
-                x0=date_fs, y0=flag["flag_high_start"],
-                x1=date_fe, y1=flag["flag_high_end"],
+                x0=x_fs, y0=flag["flag_high_start"],
+                x1=x_fe, y1=flag["flag_high_end"],
                 line=dict(color=line_color, width=2, dash="dash"),
                 row=1, col=1,
             )
@@ -399,8 +400,8 @@ def plot_kline(df_kline: pd.DataFrame, stock_name: str = "", days: int | None = 
             # 旗面下轨
             fig.add_shape(
                 type="line",
-                x0=date_fs, y0=flag["flag_low_start"],
-                x1=date_fe, y1=flag["flag_low_end"],
+                x0=x_fs, y0=flag["flag_low_start"],
+                x1=x_fe, y1=flag["flag_low_end"],
                 line=dict(color=line_color, width=2, dash="dash"),
                 row=1, col=1,
             )
@@ -408,7 +409,7 @@ def plot_kline(df_kline: pd.DataFrame, stock_name: str = "", days: int | None = 
             # 标注文字
             label_y = max(flag["flag_high_start"], flag["flag_high_end"]) * 1.01
             fig.add_annotation(
-                x=mid_date, y=label_y,
+                x=x_mid, y=label_y,
                 text=f"<b>{flag['type']}</b>",
                 showarrow=False,
                 font=dict(color=line_color, size=12),
@@ -444,16 +445,8 @@ def plot_kline(df_kline: pd.DataFrame, stock_name: str = "", days: int | None = 
             start_idx = 0
         end_idx = len(df) - 1
         fig.update_xaxes(range=[start_idx, end_idx])
-
-        # y 轴自适应：根据可见区域的高低点调整
-        visible_df = df.iloc[start_idx:end_idx + 1]
-        y_min = visible_df["low"].min()
-        y_max = visible_df["high"].max()
-        if show_boll:
-            y_min = min(y_min, visible_df["boll_down"].min())
-            y_max = max(y_max, visible_df["boll_up"].max())
-        padding = (y_max - y_min) * 0.05
-        fig.update_yaxes(range=[y_min - padding, y_max + padding], row=1, col=1)
+        # y 轴不固定，让 plotly 根据当前可见的 x 范围自动计算 y 范围
+        fig.update_yaxes(autorange=True, row=1, col=1)
 
     return fig
 
