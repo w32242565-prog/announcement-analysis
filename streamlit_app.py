@@ -643,6 +643,28 @@ def detect_flag_patterns(df_kline: pd.DataFrame) -> list[dict]:
                 if pole_vol_avg <= 0 or flag_vol_avg > pole_vol_avg * 0.6:
                     continue
 
+                # ===== 边界清晰度检查：旗面是否还能往后延伸 =====
+                if flag_end < n:
+                    ext_highs = highs[flag_start:flag_end + 1]
+                    ext_lows = lows[flag_start:flag_end + 1]
+                    if len(ext_highs) >= 2:
+                        ext_hsl = linear_slope(ext_highs)
+                        ext_lsl = linear_slope(ext_lows)
+                        can_extend = ext_hsl < 0 and ext_lsl < 0
+                        if can_extend:
+                            if flag_end - flag_start < flag_max_days:
+                                continue  # 不是终点，继续往后找自然边界
+                            else:
+                                best_flag = None
+                                break  # 超过最高可行时间，拒绝
+
+                # ===== 边界清晰度检查：旗杆是否还能往前延伸 =====
+                if pole_start > 0:
+                    ext_change = (closes[pole_end] - closes[pole_start - 1]) / closes[pole_start - 1]
+                    if abs(ext_change) >= pole_threshold and (ext_change > 0) == is_bull_pole:
+                        best_flag = None
+                        break  # 旗杆还能往前延伸，拒绝
+
                 best_flag = {
                     "type": "上飘旗",
                     "pole_start": pole_start,
@@ -689,6 +711,28 @@ def detect_flag_patterns(df_kline: pd.DataFrame) -> list[dict]:
                 flag_vol_avg = volumes[flag_start:flag_end].mean()
                 if pole_vol_avg <= 0 or flag_vol_avg > pole_vol_avg * 0.6:
                     continue
+
+                # ===== 边界清晰度检查：旗面是否还能往后延伸 =====
+                if flag_end < n:
+                    ext_highs = highs[flag_start:flag_end + 1]
+                    ext_lows = lows[flag_start:flag_end + 1]
+                    if len(ext_highs) >= 2:
+                        ext_hsl = linear_slope(ext_highs)
+                        ext_lsl = linear_slope(ext_lows)
+                        can_extend = ext_hsl > 0 and ext_lsl > 0
+                        if can_extend:
+                            if flag_end - flag_start < flag_max_days:
+                                continue  # 不是终点，继续往后找自然边界
+                            else:
+                                best_flag = None
+                                break  # 超过最高可行时间，拒绝
+
+                # ===== 边界清晰度检查：旗杆是否还能往前延伸 =====
+                if pole_start > 0:
+                    ext_change = (closes[pole_end] - closes[pole_start - 1]) / closes[pole_start - 1]
+                    if abs(ext_change) >= pole_threshold and (ext_change > 0) == is_bull_pole:
+                        best_flag = None
+                        break  # 旗杆还能往前延伸，拒绝
 
                 best_flag = {
                     "type": "下飘旗",
