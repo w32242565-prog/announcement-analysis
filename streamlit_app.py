@@ -285,6 +285,7 @@ def plot_kline(df_kline: pd.DataFrame, stock_name: str = "", days: int | None = 
 
     df = df_kline.copy()
     df["ma5"] = df["close"].rolling(window=5).mean()
+    df["ma10"] = df["close"].rolling(window=10).mean()
     df["ma20"] = df["close"].rolling(window=20).mean()
     df["ma60"] = df["close"].rolling(window=60).mean()
 
@@ -312,7 +313,7 @@ def plot_kline(df_kline: pd.DataFrame, stock_name: str = "", days: int | None = 
     )
 
     # 均线
-    for col, color, name in [("ma5", "#F59E0B", "MA5"), ("ma20", "#3B82F6", "MA20"), ("ma60", "#8B5CF6", "MA60")]:
+    for col, color, name in [("ma5", "#F59E0B", "MA5"), ("ma10", "#06B6D4", "MA10"), ("ma20", "#3B82F6", "MA20"), ("ma60", "#8B5CF6", "MA60")]:
         fig.add_trace(
             go.Scatter(x=df["date"], y=df[col], mode="lines", name=name, line=dict(color=color, width=1)),
             row=1, col=1,
@@ -345,6 +346,93 @@ def plot_kline(df_kline: pd.DataFrame, stock_name: str = "", days: int | None = 
         fig.update_xaxes(range=[start_date, end_date])
 
     return fig
+
+
+def analyze_kline_tech(df_kline: pd.DataFrame) -> dict:
+    """K线技术面分析：均线排列 + 成交量 + 量价关系"""
+    if df_kline.empty or len(df_kline) < 20:
+        return {}
+
+    df = df_kline.copy()
+    df["ma5"] = df["close"].rolling(window=5).mean()
+    df["ma10"] = df["close"].rolling(window=10).mean()
+    df["ma20"] = df["close"].rolling(window=20).mean()
+    df["vol_ma5"] = df["volume"].rolling(window=5).mean()
+    df["vol_ma20"] = df["volume"].rolling(window=20).mean()
+
+    latest = df.iloc[-1]
+    prev = df.iloc[-2] if len(df) > 1 else latest
+
+    # 1. 均线排列判断
+    ma5, ma10, ma20 = latest["ma5"], latest["ma10"], latest["ma20"]
+    if pd.notna(ma5) and pd.notna(ma10) and pd.notna(ma20):
+        if ma5 > ma10 > ma20:
+            ma_trend = "多头排列"
+            ma_desc = "短期均线在上，趋势偏强"
+        elif ma5 < ma10 < ma20:
+            ma_trend = "空头排列"
+            ma_desc = "短期均线在下，趋势偏弱"
+        else:
+            ma_trend = "均线纠缠"
+            ma_desc = "多空交织，方向不明"
+    else:
+        ma_trend = "数据不足"
+        ma_desc = "均线数据不完整"
+
+    # 2. 成交量判断
+    vol = latest["volume"]
+    vol_ma5 = latest["vol_ma5"]
+    vol_ma20 = latest["vol_ma20"]
+    if pd.notna(vol) and pd.notna(vol_ma5) and pd.notna(vol_ma20):
+        avg_vol = (vol_ma5 + vol_ma20) / 2
+        ratio = vol / avg_vol if avg_vol > 0 else 0
+        if ratio >= 1.5:
+            vol_status = "放量"
+            vol_desc = "资金异动，关注方向"
+        elif ratio >= 0.8:
+            vol_status = "正常"
+            vol_desc = "市场常态，无特殊信号"
+        elif ratio >= 0.5:
+            vol_status = "缩量"
+            vol_desc = "交投清淡，观望情绪浓"
+        else:
+            vol_status = "地量"
+            vol_desc = "极度低迷，可能变盘前兆"
+        vol_ratio = f"{ratio:.2f}倍"
+    else:
+        vol_status = "未知"
+        vol_desc = "成交量数据不完整"
+        vol_ratio = "—"
+
+    # 3. 量价关系（结合当日涨跌）
+    price_change = latest["close"] - prev["close"]
+    is_up = price_change >= 0
+    vol_price = f"{vol_status}{'上涨' if is_up else '下跌'}"
+    if vol_status == "放量":
+        vp_desc = "资金积极介入，趋势可能延续" if is_up else "资金出逃，需警惕风险"
+    elif vol_status == "缩量":
+        vp_desc = "上涨动能减弱" if is_up else "抛压减轻，可能接近底部"
+    elif vol_status == "地量":
+        vp_desc = "变盘前兆，密切关注"
+    else:
+        vp_desc = "量价配合常态"
+
+    return {
+        "ma_trend": ma_trend,
+        "ma_desc": ma_desc,
+        "ma5": f"{ma5:.2f}" if pd.notna(ma5) else "—",
+        "ma10": f"{ma10:.2f}" if pd.notna(ma10) else "—",
+        "ma20": f"{ma20:.2f}" if pd.notna(ma20) else "—",
+        "vol_status": vol_status,
+        "vol_desc": vol_desc,
+        "vol_ratio": vol_ratio,
+        "vol": f"{vol/1e4:.0f}万" if pd.notna(vol) else "—",
+        "vol_ma5": f"{vol_ma5/1e4:.0f}万" if pd.notna(vol_ma5) else "—",
+        "vol_ma20": f"{vol_ma20/1e4:.0f}万" if pd.notna(vol_ma20) else "—",
+        "vol_price": vol_price,
+        "vp_desc": vp_desc,
+        "price_change": price_change,
+    }
 
 
 # ============================
@@ -897,6 +985,32 @@ if search_clicked or True:
 
         fig_kline = plot_kline(df_kline, stock_name=name or stock_code, days=st.session_state.kline_days)
         st.plotly_chart(fig_kline, use_container_width=True)
+
+        # 技术面分析
+        tech = analyze_kline_tech(df_kline)
+        if tech:
+            st.markdown("**📐 技术面诊断**")
+            tech_cols = st.columns(3)
+            with tech_cols[0]:
+                if tech["ma_trend"] == "多头排列":
+                    st.metric("均线排列", tech["ma_trend"], tech["ma_desc"], delta_color="inverse")
+                elif tech["ma_trend"] == "空头排列":
+                    st.metric("均线排列", tech["ma_trend"], tech["ma_desc"])
+                else:
+                    st.metric("均线排列", tech["ma_trend"], tech["ma_desc"])
+                st.caption(f"MA5:{tech['ma5']}  MA10:{tech['ma10']}  MA20:{tech['ma20']}")
+            with tech_cols[1]:
+                vp_color = "normal"
+                if "放量" in tech["vol_status"]:
+                    vp_color = "inverse"
+                st.metric("成交量", tech["vol_status"], f"{tech['vol_desc']}（{tech['vol_ratio']}）", delta_color=vp_color)
+                st.caption(f"当日:{tech['vol']}  5日均:{tech['vol_ma5']}  20日均:{tech['vol_ma20']}")
+            with tech_cols[2]:
+                if "上涨" in tech["vol_price"]:
+                    st.metric("量价关系", tech["vol_price"], tech["vp_desc"], delta_color="inverse")
+                else:
+                    st.metric("量价关系", tech["vol_price"], tech["vp_desc"])
+
         kline_cols = st.columns(4)
         latest = df_kline.iloc[-1]
         prev = df_kline.iloc[-2] if len(df_kline) > 1 else latest
