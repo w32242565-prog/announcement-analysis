@@ -577,6 +577,34 @@ def detect_flag_patterns(df_kline: pd.DataFrame) -> list[dict]:
             return 0.0
         return np.polyfit(x, y_vals, 1)[0]
 
+    def body_crosses_channel(flag_start, flag_end, up_start, up_end, low_start, low_end, opens, closes):
+        """
+        检查旗面期间 K 线实体是否穿越通道边界超过 5%。
+        上轨 = 首高点 → 尾高点连线，下轨 = 首低点 → 尾低点连线。
+        返回 True 表示有穿越超过 5%，该旗形不成立。
+        """
+        dur = flag_end - 1 - flag_start
+        if dur <= 0:
+            return True
+        for j in range(flag_start, flag_end):
+            ratio = (j - flag_start) / dur
+            upper = up_start + (up_end - up_start) * ratio
+            lower = low_start + (low_end - low_start) * ratio
+            o = opens[j]
+            c = closes[j]
+            body_top = max(o, c)
+            body_bottom = min(o, c)
+            body_len = body_top - body_bottom
+            if body_len <= 0:
+                continue
+            # 上穿：实体上沿超出上轨且超出部分 > 实体长度 5%
+            if body_top > upper and (body_top - upper) > body_len * 0.05:
+                return True
+            # 下穿：实体下沿低于下轨且超出部分 > 实体长度 5%
+            if body_bottom < lower and (lower - body_bottom) > body_len * 0.05:
+                return True
+        return False
+
     # 旗杆 5~15 个交易日，旗面 5~20 个交易日
     pole_min_days, pole_max_days = 5, 15
     flag_min_days, flag_max_days = 5, 20
@@ -633,14 +661,19 @@ def detect_flag_patterns(df_kline: pd.DataFrame) -> list[dict]:
                 if avg_slope > 0 and slope_diff / avg_slope > 0.5:
                     continue
 
-                # 旗面期间价格不能创新高（在旗杆高点下方运行）
-                if flag_highs.max() > highs[pole_start:pole_end + 1].max() * 0.98:
+                # 旗面期间价格不能创新高（在旗杆高点下方运行，允许影线触及）
+                if flag_highs.max() > highs[pole_start:pole_end + 1].max() * 1.0:
                     continue
 
                 # 旗杆放量，旗面缩量
                 pole_vol_avg = volumes[pole_start:pole_end].mean()
                 flag_vol_avg = volumes[flag_start:flag_end].mean()
                 if pole_vol_avg <= 0 or flag_vol_avg > pole_vol_avg * 0.6:
+                    continue
+
+                # ===== K线实体是否穿越旗面通道超过 5% =====
+                if body_crosses_channel(flag_start, flag_end, highs[flag_start], highs[flag_end - 1],
+                                        lows[flag_start], lows[flag_end - 1], df["open"].values, closes):
                     continue
 
                 # ===== 边界清晰度检查：旗面是否还能往后延伸 =====
@@ -710,6 +743,11 @@ def detect_flag_patterns(df_kline: pd.DataFrame) -> list[dict]:
                 pole_vol_avg = volumes[pole_start:pole_end].mean()
                 flag_vol_avg = volumes[flag_start:flag_end].mean()
                 if pole_vol_avg <= 0 or flag_vol_avg > pole_vol_avg * 0.6:
+                    continue
+
+                # ===== K线实体是否穿越旗面通道超过 5% =====
+                if body_crosses_channel(flag_start, flag_end, highs[flag_start], highs[flag_end - 1],
+                                        lows[flag_start], lows[flag_end - 1], df["open"].values, closes):
                     continue
 
                 # ===== 边界清晰度检查：旗面是否还能往后延伸 =====
