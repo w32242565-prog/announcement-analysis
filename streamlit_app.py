@@ -554,9 +554,10 @@ def analyze_kline_tech(df_kline: pd.DataFrame) -> dict:
 def detect_flag_patterns(df_kline: pd.DataFrame) -> list[dict]:
     """
     检测上飘旗(Bull Flag)和下飘旗(Bear Flag)形态。
-    返回检测到的旗形列表，每个元素包含类型、旗杆区间、旗面区间、画线坐标。
+    旗杆 5~15 个交易日，旗面 5~20 个交易日（不超过 30 个）。
+    条件严格，不符合则不硬画。
     """
-    if len(df_kline) < 20:
+    if len(df_kline) < 30:
         return []
 
     df = df_kline.copy().reset_index(drop=True)
@@ -576,17 +577,17 @@ def detect_flag_patterns(df_kline: pd.DataFrame) -> list[dict]:
             return 0.0
         return np.polyfit(x, y_vals, 1)[0]
 
-    # 扫描窗口参数
-    pole_min_days, pole_max_days = 3, 6
-    flag_min_days, flag_max_days = 5, 15
-    pole_threshold = 0.10  # 旗杆涨跌幅阈值 10%
+    # 旗杆 5~15 个交易日，旗面 5~20 个交易日
+    pole_min_days, pole_max_days = 5, 15
+    flag_min_days, flag_max_days = 5, 20
+    pole_threshold = 0.15  # 旗杆涨跌幅阈值提高至 15%
 
     i = pole_max_days
     while i < n - flag_min_days:
-        # 1. 检测旗杆
+        # 1. 检测旗杆：找 5~15 天内涨/跌 ≥ 15% 的最优区间
         pole_end = i
         pole_start_candidates = []
-        for ps in range(pole_end - pole_max_days, max(0, pole_end - pole_min_days)):
+        for ps in range(pole_end - pole_max_days, max(0, pole_end - pole_min_days + 1)):
             change = (closes[pole_end] - closes[ps]) / closes[ps]
             if abs(change) >= pole_threshold:
                 pole_start_candidates.append((ps, change))
@@ -606,27 +607,40 @@ def detect_flag_patterns(df_kline: pd.DataFrame) -> list[dict]:
         for flag_end in range(flag_start + flag_min_days, min(n, flag_start + flag_max_days + 1)):
             flag_highs = highs[flag_start:flag_end]
             flag_lows = lows[flag_start:flag_end]
+            flag_closes = closes[flag_start:flag_end]
+
+            if len(flag_highs) < flag_min_days:
+                continue
 
             high_slope = linear_slope(flag_highs)
             low_slope = linear_slope(flag_lows)
 
-            # 上飘旗：旗面必须向下倾斜（与主趋势反向）
+            # --- 上飘旗 ---
             if is_bull_pole:
-                # 高点和低点都应向下倾斜（略允许小正斜率容忍）
-                if high_slope > 0 or low_slope > 0:
+                # 旗面高点和低点必须都向下倾斜
+                if high_slope >= 0 or low_slope >= 0:
                     continue
-                # 旗面回调幅度不能太大（不超过旗杆的50%）
-                max_retrace = (highs[flag_start] - lows[flag_end - 1]) / (highs[flag_start] - lows[pole_start])
-                if max_retrace > 0.6:
+
+                # 回调幅度不超过旗杆的 50%
+                pole_range = highs[pole_start:pole_end + 1].max() - lows[pole_start:pole_end + 1].min()
+                flag_range = flag_highs[0] - flag_lows[-1]
+                if pole_range <= 0 or flag_range / pole_range > 0.5:
                     continue
-                # 确认是平行通道（上轨和下轨斜率相近）
+
+                # 通道平行度：上轨和下轨斜率方向一致且差值小
                 slope_diff = abs(high_slope - low_slope)
-                if slope_diff > abs(high_slope) * 1.5:
+                avg_slope = (abs(high_slope) + abs(low_slope)) / 2
+                if avg_slope > 0 and slope_diff / avg_slope > 0.5:
                     continue
-                # 旗杆期间放量，旗面期间缩量
+
+                # 旗面期间价格不能创新高（在旗杆高点下方运行）
+                if flag_highs.max() > highs[pole_start:pole_end + 1].max() * 0.98:
+                    continue
+
+                # 旗杆放量，旗面缩量
                 pole_vol_avg = volumes[pole_start:pole_end].mean()
                 flag_vol_avg = volumes[flag_start:flag_end].mean()
-                if flag_vol_avg > pole_vol_avg * 0.8:
+                if pole_vol_avg <= 0 or flag_vol_avg > pole_vol_avg * 0.6:
                     continue
 
                 best_flag = {
@@ -648,20 +662,32 @@ def detect_flag_patterns(df_kline: pd.DataFrame) -> list[dict]:
                 }
                 break
 
-            # 下飘旗：旗面必须向上倾斜（与主趋势反向）
+            # --- 下飘旗 ---
             else:
-                if high_slope < 0 or low_slope < 0:
+                # 旗面高点和低点必须都向上倾斜
+                if high_slope <= 0 or low_slope <= 0:
                     continue
-                # 旗面反弹幅度不能太大（不超过旗杆的50%）
-                max_retrace = (highs[flag_end - 1] - lows[flag_start]) / (highs[pole_start] - lows[pole_start])
-                if max_retrace > 0.6:
+
+                # 反弹幅度不超过旗杆的 50%
+                pole_range = highs[pole_start:pole_end + 1].max() - lows[pole_start:pole_end + 1].min()
+                flag_range = flag_highs[-1] - flag_lows[0]
+                if pole_range <= 0 or flag_range / pole_range > 0.5:
                     continue
+
+                # 通道平行度
                 slope_diff = abs(high_slope - low_slope)
-                if slope_diff > abs(high_slope) * 1.5:
+                avg_slope = (abs(high_slope) + abs(low_slope)) / 2
+                if avg_slope > 0 and slope_diff / avg_slope > 0.5:
                     continue
+
+                # 旗面期间价格不创新低（在旗杆低点上方运行）
+                if flag_lows.min() < lows[pole_start:pole_end + 1].min() * 1.02:
+                    continue
+
+                # 旗杆放量，旗面缩量
                 pole_vol_avg = volumes[pole_start:pole_end].mean()
                 flag_vol_avg = volumes[flag_start:flag_end].mean()
-                if flag_vol_avg > pole_vol_avg * 0.8:
+                if pole_vol_avg <= 0 or flag_vol_avg > pole_vol_avg * 0.6:
                     continue
 
                 best_flag = {
