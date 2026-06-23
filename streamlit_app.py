@@ -278,8 +278,8 @@ def fetch_kline_from_baostock(stock_code: str, years: int = 8) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def plot_kline(df_kline: pd.DataFrame, stock_name: str = "") -> go.Figure:
-    """使用 plotly 绘制 K 线图（含成交量）"""
+def plot_kline(df_kline: pd.DataFrame, stock_name: str = "", days: int | None = None) -> go.Figure:
+    """使用 plotly 绘制 K 线图（含成交量），支持按天数缩放到最近范围"""
     if df_kline.empty:
         return go.Figure()
 
@@ -337,6 +337,12 @@ def plot_kline(df_kline: pd.DataFrame, stock_name: str = "") -> go.Figure:
     fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor="rgba(128,128,128,0.1)")
     fig.update_yaxes(title_text="价格", row=1, col=1)
     fig.update_yaxes(title_text="成交量", row=2, col=1)
+
+    # 缩放到指定天数范围
+    if days is not None:
+        end_date = df["date"].max()
+        start_date = end_date - pd.Timedelta(days=days)
+        fig.update_xaxes(range=[start_date, end_date])
 
     return fig
 
@@ -867,7 +873,29 @@ if search_clicked or True:
     with st.spinner("正在从 baostock 获取 K 线数据..."):
         df_kline = fetch_kline_from_baostock(stock_code, years=8)
     if not df_kline.empty:
-        fig_kline = plot_kline(df_kline, stock_name=name or stock_code)
+        # 初始化 session state
+        if "kline_days" not in st.session_state:
+            st.session_state.kline_days = None
+
+        # 时间范围按钮
+        btn_cols = st.columns([1, 1, 1, 1, 1, 1, 4])
+        ranges = [
+            (btn_cols[0], "近5日", 5),
+            (btn_cols[1], "近10日", 10),
+            (btn_cols[2], "近30日", 30),
+            (btn_cols[3], "近90日", 90),
+            (btn_cols[4], "近1年", 365),
+            (btn_cols[5], "全部", None),
+        ]
+        for col, label, days in ranges:
+            with col:
+                # 当前选中状态用 type="primary" 高亮
+                is_active = st.session_state.kline_days == days
+                if st.button(label, key=f"kline_{stock_code}_{days}", type="primary" if is_active else "secondary", use_container_width=True):
+                    st.session_state.kline_days = days
+                    st.rerun()
+
+        fig_kline = plot_kline(df_kline, stock_name=name or stock_code, days=st.session_state.kline_days)
         st.plotly_chart(fig_kline, use_container_width=True)
         kline_cols = st.columns(4)
         latest = df_kline.iloc[-1]
