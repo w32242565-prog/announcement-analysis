@@ -279,8 +279,10 @@ def fetch_kline_from_baostock(stock_code: str, years: int = 8) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def plot_kline(df_kline: pd.DataFrame, stock_name: str = "", days: int | None = None, flags: list[dict] | None = None) -> go.Figure:
-    """使用 plotly 绘制 K 线图（含成交量），支持按天数缩放到最近范围，并标注旗形"""
+def plot_kline(df_kline: pd.DataFrame, stock_name: str = "", days: int | None = None,
+                flags: list[dict] | None = None, show_ma: bool = True,
+                show_boll: bool = False, show_flags: bool = True) -> go.Figure:
+    """使用 plotly 绘制 K 线图（含成交量），支持按天数缩放到最近范围，并标注旗形、均线、布林带"""
     if df_kline.empty:
         return go.Figure()
 
@@ -290,6 +292,12 @@ def plot_kline(df_kline: pd.DataFrame, stock_name: str = "", days: int | None = 
     df["ma20"] = df["close"].rolling(window=20).mean()
     df["ma60"] = df["close"].rolling(window=60).mean()
 
+    # 布林带 BOLL(20,2)
+    df["boll_mid"] = df["ma20"]
+    df["boll_std"] = df["close"].rolling(window=20).std()
+    df["boll_up"] = df["boll_mid"] + 2 * df["boll_std"]
+    df["boll_down"] = df["boll_mid"] - 2 * df["boll_std"]
+
     fig = make_subplots(
         rows=2, cols=1,
         shared_xaxes=True,
@@ -298,7 +306,7 @@ def plot_kline(df_kline: pd.DataFrame, stock_name: str = "", days: int | None = 
         subplot_titles=(f"{stock_name} K线走势", "成交量"),
     )
 
-    # K线
+    # K线（加粗）
     fig.add_trace(
         go.Candlestick(
             x=df["date"],
@@ -309,14 +317,36 @@ def plot_kline(df_kline: pd.DataFrame, stock_name: str = "", days: int | None = 
             name="K线",
             increasing_line_color="#d32f2f",
             decreasing_line_color="#388e3c",
+            increasing_line_width=3,
+            decreasing_line_width=3,
+            whiskerwidth=1,
         ),
         row=1, col=1,
     )
 
     # 均线
-    for col, color, name in [("ma5", "#F59E0B", "MA5"), ("ma10", "#06B6D4", "MA10"), ("ma20", "#3B82F6", "MA20"), ("ma60", "#8B5CF6", "MA60")]:
+    if show_ma:
+        for col, color, name in [("ma5", "#F59E0B", "MA5"), ("ma10", "#06B6D4", "MA10"), ("ma20", "#3B82F6", "MA20"), ("ma60", "#8B5CF6", "MA60")]:
+            fig.add_trace(
+                go.Scatter(x=df["date"], y=df[col], mode="lines", name=name, line=dict(color=color, width=1)),
+                row=1, col=1,
+            )
+
+    # 布林带
+    if show_boll:
         fig.add_trace(
-            go.Scatter(x=df["date"], y=df[col], mode="lines", name=name, line=dict(color=color, width=1)),
+            go.Scatter(x=df["date"], y=df["boll_up"], mode="lines", name="BOLL上轨",
+                       line=dict(color="rgba(128,128,128,0.6)", width=1, dash="dot")),
+            row=1, col=1,
+        )
+        fig.add_trace(
+            go.Scatter(x=df["date"], y=df["boll_mid"], mode="lines", name="BOLL中轨",
+                       line=dict(color="rgba(128,128,128,0.8)", width=1.5)),
+            row=1, col=1,
+        )
+        fig.add_trace(
+            go.Scatter(x=df["date"], y=df["boll_down"], mode="lines", name="BOLL下轨",
+                       line=dict(color="rgba(128,128,128,0.6)", width=1, dash="dot")),
             row=1, col=1,
         )
 
@@ -328,7 +358,7 @@ def plot_kline(df_kline: pd.DataFrame, stock_name: str = "", days: int | None = 
     )
 
     # 标注旗形
-    if flags:
+    if show_flags and flags:
         for idx, flag in enumerate(flags):
             is_bull = flag["type"] == "上飘旗"
             color = "rgba(211,47,47,0.15)" if is_bull else "rgba(56,142,60,0.15)"
@@ -1157,7 +1187,16 @@ if search_clicked or True:
         if "kline_days" not in st.session_state:
             st.session_state.kline_days = None
 
+        # 初始化显示控制 session state
+        if "show_ma" not in st.session_state:
+            st.session_state.show_ma = True
+        if "show_boll" not in st.session_state:
+            st.session_state.show_boll = False
+        if "show_flags" not in st.session_state:
+            st.session_state.show_flags = False
+
         # 时间范围按钮（紧凑排列）
+        st.markdown("<span style='font-size:12px;color:#666'>时间范围</span>", unsafe_allow_html=True)
         btn_cols = st.columns([0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 10])
         ranges = [
             (btn_cols[0], "5日", 5),
@@ -1176,14 +1215,37 @@ if search_clicked or True:
                     st.session_state.kline_days = days
                     st.rerun()
 
-        # 旗形检测
-        flags = detect_flag_patterns(df_kline)
+        # 显示控制按钮
+        st.markdown("<span style='font-size:12px;color:#666'>显示图层</span>", unsafe_allow_html=True)
+        ctrl_cols = st.columns([0.7, 0.7, 0.7, 10])
+        ctrl_items = [
+            (ctrl_cols[0], "均线", "show_ma"),
+            (ctrl_cols[1], "布林带", "show_boll"),
+            (ctrl_cols[2], "旗形", "show_flags"),
+        ]
+        for col, label, state_key in ctrl_items:
+            with col:
+                is_on = st.session_state[state_key]
+                if st.button(label, key=f"ctrl_{stock_code}_{state_key}", type="primary" if is_on else "secondary"):
+                    st.session_state[state_key] = not is_on
+                    st.rerun()
 
-        fig_kline = plot_kline(df_kline, stock_name=name or stock_code, days=st.session_state.kline_days, flags=flags)
+        # 旗形检测（仅在开启时计算）
+        flags = detect_flag_patterns(df_kline) if st.session_state.show_flags else []
+
+        fig_kline = plot_kline(
+            df_kline,
+            stock_name=name or stock_code,
+            days=st.session_state.kline_days,
+            flags=flags,
+            show_ma=st.session_state.show_ma,
+            show_boll=st.session_state.show_boll,
+            show_flags=st.session_state.show_flags,
+        )
         st.plotly_chart(fig_kline, use_container_width=True)
 
-        # 旗形检测结果展示
-        if flags:
+        # 旗形检测结果展示（仅在开启时显示）
+        if st.session_state.show_flags and flags:
             st.markdown("<span style='font-size:13px'>**🚩 旗形形态检测**</span>", unsafe_allow_html=True)
             for f in flags:
                 d_ps = pd.to_datetime(f["date_pole_start"]).strftime("%Y-%m-%d")
