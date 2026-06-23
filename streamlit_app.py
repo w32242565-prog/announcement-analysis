@@ -356,17 +356,30 @@ def plot_kline(df_kline: pd.DataFrame, stock_name: str = "", days: int | None = 
         row=2, col=1,
     )
 
-    # 标注旗形
+    # 标注旗形（使用数据索引获取对应日期，兼容 category 轴）
     if show_flags and flags:
         for idx, flag in enumerate(flags):
             is_bull = flag["type"] == "上飘旗"
             color = "rgba(211,47,47,0.15)" if is_bull else "rgba(56,142,60,0.15)"
             line_color = "#d32f2f" if is_bull else "#388e3c"
 
+            # 通过索引获取对应日期（确保与 trace 的 x 值一致）
+            ps = flag["pole_start"]
+            pe = flag["pole_end"]
+            fs = flag["flag_start"]
+            fe = flag["flag_end"] - 1  # flag_end 是右开区间
+
+            date_ps = df["date"].iloc[ps]
+            date_pe = df["date"].iloc[pe]
+            date_fs = df["date"].iloc[fs]
+            date_fe = df["date"].iloc[fe]
+            mid_idx = (fs + fe) // 2
+            mid_date = df["date"].iloc[mid_idx]
+
             # 旗杆矩形区域
             fig.add_shape(
                 type="rect",
-                x0=flag["date_pole_start"], x1=flag["date_pole_end"],
+                x0=date_ps, x1=date_pe,
                 y0=flag["pole_low"], y1=flag["pole_high"],
                 fillcolor=color,
                 line=dict(width=0),
@@ -377,8 +390,8 @@ def plot_kline(df_kline: pd.DataFrame, stock_name: str = "", days: int | None = 
             # 旗面上轨
             fig.add_shape(
                 type="line",
-                x0=flag["date_flag_start"], y0=flag["flag_high_start"],
-                x1=flag["date_flag_end"], y1=flag["flag_high_end"],
+                x0=date_fs, y0=flag["flag_high_start"],
+                x1=date_fe, y1=flag["flag_high_end"],
                 line=dict(color=line_color, width=2, dash="dash"),
                 row=1, col=1,
             )
@@ -386,14 +399,13 @@ def plot_kline(df_kline: pd.DataFrame, stock_name: str = "", days: int | None = 
             # 旗面下轨
             fig.add_shape(
                 type="line",
-                x0=flag["date_flag_start"], y0=flag["flag_low_start"],
-                x1=flag["date_flag_end"], y1=flag["flag_low_end"],
+                x0=date_fs, y0=flag["flag_low_start"],
+                x1=date_fe, y1=flag["flag_low_end"],
                 line=dict(color=line_color, width=2, dash="dash"),
                 row=1, col=1,
             )
 
             # 标注文字
-            mid_date = pd.to_datetime(flag["date_flag_start"]) + (pd.to_datetime(flag["date_flag_end"]) - pd.to_datetime(flag["date_flag_start"])) / 2
             label_y = max(flag["flag_high_start"], flag["flag_high_end"]) * 1.01
             fig.add_annotation(
                 x=mid_date, y=label_y,
@@ -432,6 +444,16 @@ def plot_kline(df_kline: pd.DataFrame, stock_name: str = "", days: int | None = 
             start_idx = 0
         end_idx = len(df) - 1
         fig.update_xaxes(range=[start_idx, end_idx])
+
+        # y 轴自适应：根据可见区域的高低点调整
+        visible_df = df.iloc[start_idx:end_idx + 1]
+        y_min = visible_df["low"].min()
+        y_max = visible_df["high"].max()
+        if show_boll:
+            y_min = min(y_min, visible_df["boll_down"].min())
+            y_max = max(y_max, visible_df["boll_up"].max())
+        padding = (y_max - y_min) * 0.05
+        fig.update_yaxes(range=[y_min - padding, y_max + padding], row=1, col=1)
 
     return fig
 
@@ -1193,9 +1215,9 @@ if search_clicked or True:
     with st.spinner("正在从 baostock 获取 K 线数据..."):
         df_kline = fetch_kline_from_baostock(stock_code, years=8)
     if not df_kline.empty:
-        # 初始化 session state
+        # 初始化 session state（默认显示近3年）
         if "kline_days" not in st.session_state:
-            st.session_state.kline_days = None
+            st.session_state.kline_days = 1095
 
         # 初始化显示控制 session state
         if "show_ma" not in st.session_state:
