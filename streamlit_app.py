@@ -966,7 +966,7 @@ if search_clicked or True:
             st.session_state.kline_days = None
 
         # 时间范围按钮（紧凑排列）
-        btn_cols = st.columns([1, 1, 1, 1, 1, 1, 1, 1, 2])
+        btn_cols = st.columns([0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 10])
         ranges = [
             (btn_cols[0], "5日", 5),
             (btn_cols[1], "10日", 10),
