@@ -965,21 +965,22 @@ if search_clicked or True:
         if "kline_days" not in st.session_state:
             st.session_state.kline_days = None
 
-        # 时间范围按钮
-        btn_cols = st.columns([1, 1, 1, 1, 1, 1, 4])
+        # 时间范围按钮（紧凑排列）
+        btn_cols = st.columns([1, 1, 1, 1, 1, 1, 1, 1, 2])
         ranges = [
-            (btn_cols[0], "近5日", 5),
-            (btn_cols[1], "近10日", 10),
-            (btn_cols[2], "近30日", 30),
-            (btn_cols[3], "近90日", 90),
-            (btn_cols[4], "近1年", 365),
-            (btn_cols[5], "全部", None),
+            (btn_cols[0], "5日", 5),
+            (btn_cols[1], "10日", 10),
+            (btn_cols[2], "30日", 30),
+            (btn_cols[3], "90日", 90),
+            (btn_cols[4], "1年", 365),
+            (btn_cols[5], "3年", 1095),
+            (btn_cols[6], "5年", 1825),
+            (btn_cols[7], "全部", None),
         ]
         for col, label, days in ranges:
             with col:
-                # 当前选中状态用 type="primary" 高亮
                 is_active = st.session_state.kline_days == days
-                if st.button(label, key=f"kline_{stock_code}_{days}", type="primary" if is_active else "secondary", use_container_width=True):
+                if st.button(label, key=f"kline_{stock_code}_{days}", type="primary" if is_active else "secondary"):
                     st.session_state.kline_days = days
                     st.rerun()
 
@@ -989,7 +990,7 @@ if search_clicked or True:
         # 技术面分析
         tech = analyze_kline_tech(df_kline)
         if tech:
-            st.markdown("**📐 技术面诊断**")
+            st.markdown("<span style='font-size:14px'>**📐 技术面诊断**</span>", unsafe_allow_html=True)
             tech_cols = st.columns(3)
             with tech_cols[0]:
                 if tech["ma_trend"] == "多头排列":
@@ -1015,7 +1016,10 @@ if search_clicked or True:
         latest = df_kline.iloc[-1]
         prev = df_kline.iloc[-2] if len(df_kline) > 1 else latest
         kline_cols[0].metric("最新收盘价", f"{latest['close']:.2f}", f"{(latest['close'] - prev['close']):.2f}")
+        # 计算20日平均成交额
+        amount_ma20 = df_kline["amount"].tail(20).mean()
         kline_cols[1].metric("成交额", f"{latest['amount']/1e8:.2f} 亿")
+        kline_cols[1].caption(f"20日均: {amount_ma20/1e8:.2f} 亿")
         kline_cols[2].metric("换手率", f"{latest['turn']:.2f}%")
         kline_cols[3].metric("8年涨跌幅", f"{((latest['close'] / df_kline.iloc[0]['close'] - 1) * 100):.2f}%")
     else:
