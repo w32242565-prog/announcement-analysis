@@ -317,9 +317,8 @@ def plot_kline(df_kline: pd.DataFrame, stock_name: str = "", days: int | None = 
             name="K线",
             increasing_line_color="#d32f2f",
             decreasing_line_color="#388e3c",
-            increasing_line_width=3,
-            decreasing_line_width=3,
-            whiskerwidth=1,
+            increasing_line_width=1,
+            decreasing_line_width=1,
         ),
         row=1, col=1,
     )
@@ -412,16 +411,27 @@ def plot_kline(df_kline: pd.DataFrame, stock_name: str = "", days: int | None = 
         margin=dict(l=40, r=40, t=60, b=40),
         template="plotly_white",
     )
-    fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor="rgba(128,128,128,0.1)")
+    fig.update_xaxes(
+        type="category",
+        tickmode="auto",
+        nticks=10,
+        showgrid=True, gridwidth=1, gridcolor="rgba(128,128,128,0.1)",
+    )
     fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor="rgba(128,128,128,0.1)")
     fig.update_yaxes(title_text="价格", row=1, col=1)
     fig.update_yaxes(title_text="成交量", row=2, col=1)
 
-    # 缩放到指定天数范围
+    # 缩放到指定天数范围（category 轴用索引）
     if days is not None:
         end_date = df["date"].max()
         start_date = end_date - pd.Timedelta(days=days)
-        fig.update_xaxes(range=[start_date, end_date])
+        mask = df["date"] >= start_date
+        if mask.any():
+            start_idx = max(0, df[mask].index[0] - 1)
+        else:
+            start_idx = 0
+        end_idx = len(df) - 1
+        fig.update_xaxes(range=[start_idx, end_idx])
 
     return fig
 
