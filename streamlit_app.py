@@ -10,6 +10,7 @@ import streamlit as st
 import requests
 import sqlite3
 import pandas as pd
+import numpy as np
 import re
 from datetime import datetime, timedelta
 import os
@@ -278,8 +279,8 @@ def fetch_kline_from_baostock(stock_code: str, years: int = 8) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def plot_kline(df_kline: pd.DataFrame, stock_name: str = "", days: int | None = None) -> go.Figure:
-    """使用 plotly 绘制 K 线图（含成交量），支持按天数缩放到最近范围"""
+def plot_kline(df_kline: pd.DataFrame, stock_name: str = "", days: int | None = None, flags: list[dict] | None = None) -> go.Figure:
+    """使用 plotly 绘制 K 线图（含成交量），支持按天数缩放到最近范围，并标注旗形"""
     if df_kline.empty:
         return go.Figure()
 
@@ -325,6 +326,53 @@ def plot_kline(df_kline: pd.DataFrame, stock_name: str = "", days: int | None = 
         go.Bar(x=df["date"], y=df["volume"], marker_color=colors, name="成交量", showlegend=False),
         row=2, col=1,
     )
+
+    # 标注旗形
+    if flags:
+        for idx, flag in enumerate(flags):
+            is_bull = flag["type"] == "上飘旗"
+            color = "rgba(211,47,47,0.15)" if is_bull else "rgba(56,142,60,0.15)"
+            line_color = "#d32f2f" if is_bull else "#388e3c"
+
+            # 旗杆矩形区域
+            fig.add_shape(
+                type="rect",
+                x0=flag["date_pole_start"], x1=flag["date_pole_end"],
+                y0=flag["pole_low"], y1=flag["pole_high"],
+                fillcolor=color,
+                line=dict(width=0),
+                layer="below",
+                row=1, col=1,
+            )
+
+            # 旗面上轨
+            fig.add_shape(
+                type="line",
+                x0=flag["date_flag_start"], y0=flag["flag_high_start"],
+                x1=flag["date_flag_end"], y1=flag["flag_high_end"],
+                line=dict(color=line_color, width=2, dash="dash"),
+                row=1, col=1,
+            )
+
+            # 旗面下轨
+            fig.add_shape(
+                type="line",
+                x0=flag["date_flag_start"], y0=flag["flag_low_start"],
+                x1=flag["date_flag_end"], y1=flag["flag_low_end"],
+                line=dict(color=line_color, width=2, dash="dash"),
+                row=1, col=1,
+            )
+
+            # 标注文字
+            mid_date = pd.to_datetime(flag["date_flag_start"]) + (pd.to_datetime(flag["date_flag_end"]) - pd.to_datetime(flag["date_flag_start"])) / 2
+            label_y = max(flag["flag_high_start"], flag["flag_high_end"]) * 1.01
+            fig.add_annotation(
+                x=mid_date, y=label_y,
+                text=f"<b>{flag['type']}</b>",
+                showarrow=False,
+                font=dict(color=line_color, size=12),
+                row=1, col=1,
+            )
 
     fig.update_layout(
         height=600,
@@ -433,6 +481,150 @@ def analyze_kline_tech(df_kline: pd.DataFrame) -> dict:
         "vp_desc": vp_desc,
         "price_change": price_change,
     }
+
+
+# ============================
+# 2.5 旗形检测
+# ============================
+def detect_flag_patterns(df_kline: pd.DataFrame) -> list[dict]:
+    """
+    检测上飘旗(Bull Flag)和下飘旗(Bear Flag)形态。
+    返回检测到的旗形列表，每个元素包含类型、旗杆区间、旗面区间、画线坐标。
+    """
+    if len(df_kline) < 20:
+        return []
+
+    df = df_kline.copy().reset_index(drop=True)
+    closes = df["close"].values
+    highs = df["high"].values
+    lows = df["low"].values
+    volumes = df["volume"].values
+    dates = df["date"].values
+    n = len(df)
+
+    flags = []
+
+    def linear_slope(y_vals):
+        """计算线性回归斜率"""
+        x = np.arange(len(y_vals))
+        if len(x) < 2:
+            return 0.0
+        return np.polyfit(x, y_vals, 1)[0]
+
+    # 扫描窗口参数
+    pole_min_days, pole_max_days = 3, 6
+    flag_min_days, flag_max_days = 5, 15
+    pole_threshold = 0.10  # 旗杆涨跌幅阈值 10%
+
+    i = pole_max_days
+    while i < n - flag_min_days:
+        # 1. 检测旗杆
+        pole_end = i
+        pole_start_candidates = []
+        for ps in range(pole_end - pole_max_days, max(0, pole_end - pole_min_days)):
+            change = (closes[pole_end] - closes[ps]) / closes[ps]
+            if abs(change) >= pole_threshold:
+                pole_start_candidates.append((ps, change))
+
+        if not pole_start_candidates:
+            i += 1
+            continue
+
+        # 取变化最大的一段作为旗杆
+        pole_start, pole_change = max(pole_start_candidates, key=lambda x: abs(x[1]))
+        is_bull_pole = pole_change > 0
+
+        # 2. 检测旗面
+        flag_start = pole_end
+        best_flag = None
+
+        for flag_end in range(flag_start + flag_min_days, min(n, flag_start + flag_max_days + 1)):
+            flag_highs = highs[flag_start:flag_end]
+            flag_lows = lows[flag_start:flag_end]
+
+            high_slope = linear_slope(flag_highs)
+            low_slope = linear_slope(flag_lows)
+
+            # 上飘旗：旗面必须向下倾斜（与主趋势反向）
+            if is_bull_pole:
+                # 高点和低点都应向下倾斜（略允许小正斜率容忍）
+                if high_slope > 0 or low_slope > 0:
+                    continue
+                # 旗面回调幅度不能太大（不超过旗杆的50%）
+                max_retrace = (highs[flag_start] - lows[flag_end - 1]) / (highs[flag_start] - lows[pole_start])
+                if max_retrace > 0.6:
+                    continue
+                # 确认是平行通道（上轨和下轨斜率相近）
+                slope_diff = abs(high_slope - low_slope)
+                if slope_diff > abs(high_slope) * 1.5:
+                    continue
+                # 旗杆期间放量，旗面期间缩量
+                pole_vol_avg = volumes[pole_start:pole_end].mean()
+                flag_vol_avg = volumes[flag_start:flag_end].mean()
+                if flag_vol_avg > pole_vol_avg * 0.8:
+                    continue
+
+                best_flag = {
+                    "type": "上飘旗",
+                    "pole_start": pole_start,
+                    "pole_end": pole_end,
+                    "flag_start": flag_start,
+                    "flag_end": flag_end,
+                    "pole_high": highs[pole_start:pole_end + 1].max(),
+                    "pole_low": lows[pole_start:pole_end + 1].min(),
+                    "flag_high_start": highs[flag_start],
+                    "flag_high_end": highs[flag_end - 1],
+                    "flag_low_start": lows[flag_start],
+                    "flag_low_end": lows[flag_end - 1],
+                    "date_pole_start": dates[pole_start],
+                    "date_pole_end": dates[pole_end],
+                    "date_flag_start": dates[flag_start],
+                    "date_flag_end": dates[flag_end - 1],
+                }
+                break
+
+            # 下飘旗：旗面必须向上倾斜（与主趋势反向）
+            else:
+                if high_slope < 0 or low_slope < 0:
+                    continue
+                # 旗面反弹幅度不能太大（不超过旗杆的50%）
+                max_retrace = (highs[flag_end - 1] - lows[flag_start]) / (highs[pole_start] - lows[pole_start])
+                if max_retrace > 0.6:
+                    continue
+                slope_diff = abs(high_slope - low_slope)
+                if slope_diff > abs(high_slope) * 1.5:
+                    continue
+                pole_vol_avg = volumes[pole_start:pole_end].mean()
+                flag_vol_avg = volumes[flag_start:flag_end].mean()
+                if flag_vol_avg > pole_vol_avg * 0.8:
+                    continue
+
+                best_flag = {
+                    "type": "下飘旗",
+                    "pole_start": pole_start,
+                    "pole_end": pole_end,
+                    "flag_start": flag_start,
+                    "flag_end": flag_end,
+                    "pole_high": highs[pole_start:pole_end + 1].max(),
+                    "pole_low": lows[pole_start:pole_end + 1].min(),
+                    "flag_high_start": highs[flag_start],
+                    "flag_high_end": highs[flag_end - 1],
+                    "flag_low_start": lows[flag_start],
+                    "flag_low_end": lows[flag_end - 1],
+                    "date_pole_start": dates[pole_start],
+                    "date_pole_end": dates[pole_end],
+                    "date_flag_start": dates[flag_start],
+                    "date_flag_end": dates[flag_end - 1],
+                }
+                break
+
+        if best_flag:
+            flags.append(best_flag)
+            i = best_flag["flag_end"] + 1  # 跳过已检测到的旗形
+        else:
+            i += 1
+
+    return flags
 
 
 # ============================
@@ -984,13 +1176,39 @@ if search_clicked or True:
                     st.session_state.kline_days = days
                     st.rerun()
 
-        fig_kline = plot_kline(df_kline, stock_name=name or stock_code, days=st.session_state.kline_days)
+        # 旗形检测
+        flags = detect_flag_patterns(df_kline)
+
+        fig_kline = plot_kline(df_kline, stock_name=name or stock_code, days=st.session_state.kline_days, flags=flags)
         st.plotly_chart(fig_kline, use_container_width=True)
+
+        # 旗形检测结果展示
+        if flags:
+            st.markdown("<span style='font-size:13px'>**🚩 旗形形态检测**</span>", unsafe_allow_html=True)
+            for f in flags:
+                d_ps = pd.to_datetime(f["date_pole_start"]).strftime("%Y-%m-%d")
+                d_pe = pd.to_datetime(f["date_pole_end"]).strftime("%Y-%m-%d")
+                d_fs = pd.to_datetime(f["date_flag_start"]).strftime("%Y-%m-%d")
+                d_fe = pd.to_datetime(f["date_flag_end"]).strftime("%Y-%m-%d")
+                if f["type"] == "上飘旗":
+                    st.success(
+                        f"检测到 **上飘旗**（看涨信号）："
+                        f"旗杆期 {d_ps} → {d_pe} 急速拉升，"
+                        f"随后 {d_fs} → {d_fe} 缩量向下整理，"
+                        f"关注放量突破旗面上轨后的跟进机会。"
+                    )
+                else:
+                    st.error(
+                        f"检测到 **下飘旗**（看跌信号）："
+                        f"旗杆期 {d_ps} → {d_pe} 急速杀跌，"
+                        f"随后 {d_fs} → {d_fe} 缩量向上整理，"
+                        f"警惕放量跌破旗面下轨后的持续下跌风险。"
+                    )
 
         # 技术面分析
         tech = analyze_kline_tech(df_kline)
         if tech:
-            st.markdown("<span style='font-size:14px'>**📐 技术面诊断**</span>", unsafe_allow_html=True)
+            st.markdown("<span style='font-size:13px'>**📐 技术面诊断**</span>", unsafe_allow_html=True)
             tech_cols = st.columns(3)
             with tech_cols[0]:
                 if tech["ma_trend"] == "多头排列":
