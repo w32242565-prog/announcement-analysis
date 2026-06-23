@@ -11,13 +11,18 @@ import requests
 import sqlite3
 import pandas as pd
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 import json
 from io import BytesIO
 from docx import Document
 from docx.shared import Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+# K线与财报可视化
+import baostock as bs
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 # 云端/本地 统一配置（路径全由环境变量控制，默认保持本地行为）
 from cloud_config import (
@@ -209,6 +214,164 @@ def get_company_info(stock_code: str, db_path: str = None) -> dict:
     except Exception:
         pass
     return {}
+
+
+# ============================
+# 2.5 baostock K线数据获取
+# ============================
+def convert_stock_code_for_baostock(stock_code: str) -> str:
+    """将 6 位数字股票代码转换为 baostock 格式"""
+    if stock_code.startswith(("60", "68", "51", "52", "53")):
+        return f"sh.{stock_code}"
+    elif stock_code.startswith(("00", "30", "15", "16", "18")):
+        return f"sz.{stock_code}"
+    elif stock_code.startswith(("43", "83", "87", "88", "82", "92")):
+        return f"bj.{stock_code}"
+    else:
+        # 默认按上海处理
+        return f"sh.{stock_code}"
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_kline_from_baostock(stock_code: str, years: int = 8) -> pd.DataFrame:
+    """从 baostock 获取近 N 年日线 K 线数据"""
+    bs_code = convert_stock_code_for_baostock(stock_code)
+    end_date = datetime.now().strftime("%Y-%m-%d")
+    start_date = (datetime.now() - timedelta(days=years * 365)).strftime("%Y-%m-%d")
+
+    try:
+        lg = bs.login()
+        if lg.error_code != "0":
+            st.warning(f"baostock 登录失败: {lg.error_msg}")
+            return pd.DataFrame()
+
+        fields = "date,code,open,high,low,close,volume,amount,turn,pctChg,tradestatus"
+        rs = bs.query_history_k_data_plus(
+            bs_code,
+            fields,
+            start_date=start_date,
+            end_date=end_date,
+            frequency="d",
+            adjustflag="3",  # 前复权
+        )
+
+        data_list = []
+        while rs.next():
+            data_list.append(rs.get_row_data())
+        bs.logout()
+
+        if not data_list:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(data_list, columns=rs.fields)
+        # 类型转换
+        numeric_cols = ["open", "high", "low", "close", "volume", "amount", "turn", "pctChg"]
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        df["date"] = pd.to_datetime(df["date"])
+        # 只保留交易日
+        df = df[df.get("tradestatus", "1") == "1"].copy()
+        return df
+    except Exception as e:
+        st.warning(f"获取 K 线数据失败: {e}")
+        return pd.DataFrame()
+
+
+def plot_kline(df_kline: pd.DataFrame, stock_name: str = "") -> go.Figure:
+    """使用 plotly 绘制 K 线图（含成交量）"""
+    if df_kline.empty:
+        return go.Figure()
+
+    df = df_kline.copy()
+    df["ma5"] = df["close"].rolling(window=5).mean()
+    df["ma20"] = df["close"].rolling(window=20).mean()
+    df["ma60"] = df["close"].rolling(window=60).mean()
+
+    fig = make_subplots(
+        rows=2, cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.03,
+        row_heights=[0.75, 0.25],
+        subplot_titles=(f"{stock_name} K线走势", "成交量"),
+    )
+
+    # K线
+    fig.add_trace(
+        go.Candlestick(
+            x=df["date"],
+            open=df["open"],
+            high=df["high"],
+            low=df["low"],
+            close=df["close"],
+            name="K线",
+            increasing_line_color="#d32f2f",
+            decreasing_line_color="#388e3c",
+        ),
+        row=1, col=1,
+    )
+
+    # 均线
+    for col, color, name in [("ma5", "#F59E0B", "MA5"), ("ma20", "#3B82F6", "MA20"), ("ma60", "#8B5CF6", "MA60")]:
+        fig.add_trace(
+            go.Scatter(x=df["date"], y=df[col], mode="lines", name=name, line=dict(color=color, width=1)),
+            row=1, col=1,
+        )
+
+    # 成交量颜色
+    colors = ["#d32f2f" if c >= o else "#388e3c" for c, o in zip(df["close"], df["open"])]
+    fig.add_trace(
+        go.Bar(x=df["date"], y=df["volume"], marker_color=colors, name="成交量", showlegend=False),
+        row=2, col=1,
+    )
+
+    fig.update_layout(
+        height=600,
+        xaxis_rangeslider_visible=False,
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        margin=dict(l=40, r=40, t=60, b=40),
+        template="plotly_white",
+    )
+    fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor="rgba(128,128,128,0.1)")
+    fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor="rgba(128,128,128,0.1)")
+    fig.update_yaxes(title_text="价格", row=1, col=1)
+    fig.update_yaxes(title_text="成交量", row=2, col=1)
+
+    return fig
+
+
+# ============================
+# 2.6 财报数据读取
+# ============================
+FINANCIAL_KEYWORDS = [
+    "业绩预告", "业绩快报", "季度报告", "年度报告", "半年度报告",
+    "一季度报告", "三季度报告", "中报", "年报", "季报",
+]
+
+
+def is_financial_report(title: str) -> bool:
+    """判断公告标题是否属于财报类"""
+    t = str(title).lower()
+    for kw in FINANCIAL_KEYWORDS:
+        if kw in t:
+            return True
+    return False
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_financial_indicators(stock_code: str) -> pd.DataFrame:
+    """从 08_主要财务指标.csv 读取该公司关键财务指标"""
+    csv_path = "04_原始数据备份/08_主要财务指标.csv"
+    if not os.path.exists(csv_path):
+        return pd.DataFrame()
+    try:
+        df = pd.read_csv(csv_path, encoding="utf-8-sig")
+        # 数据格式：选项,指标,20260331,20251231,...（列为日期）
+        # 只需返回全部数据，由展示部分处理
+        return df
+    except Exception:
+        return pd.DataFrame()
 
 
 # ============================
@@ -699,6 +862,25 @@ if search_clicked or True:
 
     st.divider()
 
+    # --- K 线走势图 ---
+    st.subheader("📈 近8年 K 线走势（前复权）")
+    with st.spinner("正在从 baostock 获取 K 线数据..."):
+        df_kline = fetch_kline_from_baostock(stock_code, years=8)
+    if not df_kline.empty:
+        fig_kline = plot_kline(df_kline, stock_name=name or stock_code)
+        st.plotly_chart(fig_kline, use_container_width=True)
+        kline_cols = st.columns(4)
+        latest = df_kline.iloc[-1]
+        prev = df_kline.iloc[-2] if len(df_kline) > 1 else latest
+        kline_cols[0].metric("最新收盘价", f"{latest['close']:.2f}", f"{(latest['close'] - prev['close']):.2f}")
+        kline_cols[1].metric("成交额", f"{latest['amount']/1e8:.2f} 亿")
+        kline_cols[2].metric("换手率", f"{latest['turn']:.2f}%")
+        kline_cols[3].metric("8年涨跌幅", f"{((latest['close'] / df_kline.iloc[0]['close'] - 1) * 100):.2f}%")
+    else:
+        st.info("未获取到 K 线数据，请检查网络或股票代码。")
+
+    st.divider()
+
     # --- 统计概览 ---
     st.subheader("📊 公告信号统计")
     sig_counts = df["ai_signal"].value_counts().to_dict()
@@ -753,6 +935,91 @@ if search_clicked or True:
             "信号": st.column_config.TextColumn("信号", width="small"),
         },
     )
+
+    st.divider()
+
+    # --- 财报公告专区 ---
+    st.subheader("📑 财报公告专区")
+    df_finance = df[df["title"].apply(is_financial_report)].copy()
+    if not df_finance.empty:
+        st.markdown(f"检测到 **{len(df_finance)}** 条财报相关公告，已单独列出：")
+        fin_display = df_finance[["announce_date", "title", "ai_tag", "ai_signal"]].copy()
+        fin_display.columns = ["日期", "公告标题", "AI分类", "信号"]
+        st.dataframe(
+            fin_display,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "日期": st.column_config.DateColumn("日期", format="YYYY-MM-DD"),
+                "公告标题": st.column_config.TextColumn("公告标题", width="large"),
+                "AI分类": st.column_config.TextColumn("AI分类", width="medium"),
+                "信号": st.column_config.TextColumn("信号", width="small"),
+            },
+        )
+    else:
+        st.info("未检测到财报相关公告。")
+
+    # --- 关键财务指标趋势 ---
+    st.subheader("💰 关键财务指标趋势")
+    df_fin_indicators = get_financial_indicators(stock_code)
+    if not df_fin_indicators.empty:
+        # 指标名称在第一列（'选项'）和第二列（'指标'），后续列为日期
+        # 提取常用指标行
+        indicators_of_interest = {
+            "归母净利润": "归母净利润（元）",
+            "营业总收入": "营业总收入（元）",
+            "营业成本": "营业成本（元）",
+            "净利润": "净利润（元）",
+        }
+        date_cols = [c for c in df_fin_indicators.columns if re.match(r"^\d{8}$", str(c))]
+        date_cols_sorted = sorted(date_cols, reverse=True)[:16]  # 最近16期（约4年季度数据）
+        date_cols_sorted = sorted(date_cols_sorted)  # 再按时间正序排
+
+        fig_fin = go.Figure()
+        colors = ["#d32f2f", "#1976d2", "#388e3c", "#f57c00"]
+        color_idx = 0
+        for ind_name, label in indicators_of_interest.items():
+            row = df_fin_indicators[df_fin_indicators["指标"] == ind_name]
+            if row.empty:
+                continue
+            values = []
+            x_labels = []
+            for d in date_cols_sorted:
+                val = row.iloc[0].get(d)
+                if pd.notna(val):
+                    try:
+                        values.append(float(val))
+                        x_labels.append(f"{d[:4]}-{d[4:6]}")
+                    except (ValueError, TypeError):
+                        pass
+            if values:
+                # 亿元转换
+                values_yi = [v / 1e8 for v in values]
+                fig_fin.add_trace(
+                    go.Scatter(
+                        x=x_labels, y=values_yi, mode="lines+markers",
+                        name=label, line=dict(color=colors[color_idx % len(colors)], width=2),
+                    )
+                )
+                color_idx += 1
+
+        if fig_fin.data:
+            fig_fin.update_layout(
+                height=400,
+                xaxis_title="报告期",
+                yaxis_title="金额（亿元）",
+                hovermode="x unified",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                margin=dict(l=40, r=40, t=60, b=40),
+                template="plotly_white",
+            )
+            st.plotly_chart(fig_fin, use_container_width=True)
+        else:
+            st.info("财务指标数据格式不匹配，无法绘制趋势图。")
+    else:
+        st.info("未找到主要财务指标数据（08_主要财务指标.csv）。")
+
+    st.divider()
 
     # --- 逐条详情（可展开） ---
     st.subheader("🔍 公告详情与 AI 分析")
