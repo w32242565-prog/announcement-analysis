@@ -389,11 +389,45 @@ def plot_kline(df_kline: pd.DataFrame, stock_name: str = "", days: int | None = 
                 row=1, col=1,
             )
 
+            # 确定画线参数（优先用收盘价趋势线，旗面从旗杆顶端/底端开始画）
+            if "upper_slope" in flag and "upper_intercept" in flag:
+                flag_dur = flag["flag_end"] - flag["flag_start"]
+
+                # 旗面起点从旗杆顶端（上飘旗）或底端（下飘旗）开始
+                if flag.get("pole_peak_idx") is not None:
+                    draw_start = flag["pole_peak_idx"]
+                elif flag.get("pole_trough_idx") is not None:
+                    draw_start = flag["pole_trough_idx"]
+                else:
+                    draw_start = flag["flag_start"]
+
+                x_draw = x_vals[draw_start]
+                x_fe_draw = x_vals[flag["flag_end"] - 1]
+
+                rel_start = draw_start - flag["flag_start"]
+                upper_y0 = flag["upper_slope"] * rel_start + flag["upper_intercept"]
+                upper_y1 = flag["upper_slope"] * (flag_dur - 1) + flag["upper_intercept"]
+                lower_y0 = flag["lower_slope"] * rel_start + flag["lower_intercept"]
+                lower_y1 = flag["lower_slope"] * (flag_dur - 1) + flag["lower_intercept"]
+
+                x_mid_line = x_vals[(draw_start + flag["flag_end"] - 1) // 2]
+                label_y_line = max(upper_y0, upper_y1) * 1.01
+            else:
+                # 回退到旧的画线方式
+                x_draw = x_fs
+                x_fe_draw = x_fe
+                upper_y0 = flag["flag_high_start"]
+                upper_y1 = flag["flag_high_end"]
+                lower_y0 = flag["flag_low_start"]
+                lower_y1 = flag["flag_low_end"]
+                x_mid_line = x_mid
+                label_y_line = max(flag["flag_high_start"], flag["flag_high_end"]) * 1.01
+
             # 旗面上轨
             fig.add_shape(
                 type="line",
-                x0=x_fs, y0=flag["flag_high_start"],
-                x1=x_fe, y1=flag["flag_high_end"],
+                x0=x_draw, y0=upper_y0,
+                x1=x_fe_draw, y1=upper_y1,
                 line=dict(color=line_color, width=2, dash="dash"),
                 row=1, col=1,
             )
@@ -401,16 +435,15 @@ def plot_kline(df_kline: pd.DataFrame, stock_name: str = "", days: int | None = 
             # 旗面下轨
             fig.add_shape(
                 type="line",
-                x0=x_fs, y0=flag["flag_low_start"],
-                x1=x_fe, y1=flag["flag_low_end"],
+                x0=x_draw, y0=lower_y0,
+                x1=x_fe_draw, y1=lower_y1,
                 line=dict(color=line_color, width=2, dash="dash"),
                 row=1, col=1,
             )
 
             # 标注文字
-            label_y = max(flag["flag_high_start"], flag["flag_high_end"]) * 1.01
             fig.add_annotation(
-                x=x_mid, y=label_y,
+                x=x_mid_line, y=label_y_line,
                 text=f"<b>{flag['type']}</b>",
                 showarrow=False,
                 font=dict(color=line_color, size=12),
@@ -438,12 +471,25 @@ def plot_kline(df_kline: pd.DataFrame, stock_name: str = "", days: int | None = 
             x_te = x_vals[te]
             x_mid = x_vals[(ts + te) // 2]
 
+            # 使用收盘价趋势线参数画线
+            if "upper_slope" in tri and "upper_intercept" in tri:
+                win_dur = tri["end"] - tri["start"]
+                upper_y0 = tri["upper_intercept"]
+                upper_y1 = tri["upper_slope"] * (win_dur - 1) + tri["upper_intercept"]
+                lower_y0 = tri["lower_intercept"]
+                lower_y1 = tri["lower_slope"] * (win_dur - 1) + tri["lower_intercept"]
+            else:
+                upper_y0 = tri["high_start"]
+                upper_y1 = tri["high_end"]
+                lower_y0 = tri["low_start"]
+                lower_y1 = tri["low_end"]
+
             # 三角形区域填充
             fig.add_shape(
                 type="rect",
                 x0=x_ts, x1=x_te,
-                y0=min(tri["low_start"], tri["low_end"]),
-                y1=max(tri["high_start"], tri["high_end"]),
+                y0=min(lower_y0, lower_y1),
+                y1=max(upper_y0, upper_y1),
                 fillcolor=fill_color,
                 line=dict(width=0),
                 layer="below",
@@ -453,8 +499,8 @@ def plot_kline(df_kline: pd.DataFrame, stock_name: str = "", days: int | None = 
             # 上轨
             fig.add_shape(
                 type="line",
-                x0=x_ts, y0=tri["high_start"],
-                x1=x_te, y1=tri["high_end"],
+                x0=x_ts, y0=upper_y0,
+                x1=x_te, y1=upper_y1,
                 line=dict(color=line_color, width=2, dash="dash"),
                 row=1, col=1,
             )
@@ -462,14 +508,14 @@ def plot_kline(df_kline: pd.DataFrame, stock_name: str = "", days: int | None = 
             # 下轨
             fig.add_shape(
                 type="line",
-                x0=x_ts, y0=tri["low_start"],
-                x1=x_te, y1=tri["low_end"],
+                x0=x_ts, y0=lower_y0,
+                x1=x_te, y1=lower_y1,
                 line=dict(color=line_color, width=2, dash="dash"),
                 row=1, col=1,
             )
 
             # 标注文字
-            label_y = max(tri["high_start"], tri["high_end"]) * 1.01
+            label_y = max(upper_y0, upper_y1) * 1.01
             fig.add_annotation(
                 x=x_mid, y=label_y,
                 text=f"<b>{tri_type}</b>",
@@ -650,6 +696,88 @@ def _body_crosses_channel(start, end, up_start, up_end, low_start, low_end, open
     return False
 
 
+def _find_local_extrema(vals, window=2):
+    """找到局部高点和低点索引（优先用收盘价，避免影线干扰）"""
+    highs = []
+    lows = []
+    n = len(vals)
+    for i in range(window, n - window):
+        is_high = all(vals[i] > vals[i - j] for j in range(1, window + 1)) and all(vals[i] > vals[i + j] for j in range(1, window + 1))
+        is_low = all(vals[i] < vals[i - j] for j in range(1, window + 1)) and all(vals[i] < vals[i + j] for j in range(1, window + 1))
+        if is_high:
+            highs.append(i)
+        elif is_low:
+            lows.append(i)
+    return highs, lows
+
+
+def _fit_trendline(vals, indices, expected_direction='any', tolerance=0.015):
+    """
+    用极值点拟合趋势线。
+
+    尝试所有2点和3点组合，选择触及极值点最多的线。
+    要求至少2个极值点确认，3个点更可靠。
+    允许微调：第3个点差一点触及也在容差范围内通过。
+
+    参数:
+        vals: 价格序列（收盘价）
+        indices: 极值点索引列表
+        expected_direction: 'up', 'down', 或 'any'
+        tolerance: 容差比例（默认1.5%）
+
+    返回:
+        {"slope", "intercept", "used_indices", "touch_count", "touch_indices"} 或 None
+    """
+    if len(indices) < 2:
+        return None
+
+    from itertools import combinations
+    best_touch = -1
+    best_result = None
+
+    max_r = min(len(indices), 3)
+    for r in range(2, max_r + 1):
+        for combo in combinations(indices, r):
+            combo = sorted(combo)
+            x = np.array(combo, dtype=float)
+            y = vals[combo]
+            slope, intercept = np.polyfit(x, y, 1)
+
+            # 检查方向
+            if expected_direction == 'down' and slope >= 0:
+                continue
+            if expected_direction == 'up' and slope <= 0:
+                continue
+
+            # 统计触及的极值点数（容差内）
+            touch_indices = []
+            for i in indices:
+                expected_price = slope * i + intercept
+                actual = vals[i]
+                if expected_price > 0:
+                    diff_ratio = abs(actual - expected_price) / expected_price
+                else:
+                    diff_ratio = abs(actual - expected_price)
+                if diff_ratio <= tolerance:
+                    touch_indices.append(i)
+
+            touch = len(touch_indices)
+            if touch > best_touch:
+                best_touch = touch
+                best_result = {
+                    "slope": float(slope),
+                    "intercept": float(intercept),
+                    "used_indices": list(combo),
+                    "touch_count": touch,
+                    "touch_indices": touch_indices,
+                }
+
+    if best_result is None or best_result["touch_count"] < 2:
+        return None
+
+    return best_result
+
+
 # ============================
 # 2.5 旗形检测
 # ============================
@@ -722,7 +850,21 @@ def detect_flag_patterns(df_kline: pd.DataFrame) -> list[dict]:
                 if pole_range <= 0 or flag_range / pole_range > 0.5:
                     continue
 
-                # 通道平行度：上轨和下轨斜率方向一致且差值小
+                # ===== 用收盘价极值点重新拟合趋势线并验证（最少2个点，3个点更可靠） =====
+                close_highs_idx, close_lows_idx = _find_local_extrema(flag_closes)
+
+                if len(close_highs_idx) < 2 or len(close_lows_idx) < 2:
+                    continue
+
+                upper_line = _fit_trendline(flag_closes, close_highs_idx, expected_direction='down', tolerance=0.015)
+                lower_line = _fit_trendline(flag_closes, close_lows_idx, expected_direction='down', tolerance=0.015)
+
+                if upper_line is None or lower_line is None:
+                    continue
+
+                # 用收盘价拟合的斜率重新验证平行度
+                high_slope = upper_line["slope"]
+                low_slope = lower_line["slope"]
                 slope_diff = abs(high_slope - low_slope)
                 avg_slope = (abs(high_slope) + abs(low_slope)) / 2
                 if avg_slope > 0 and slope_diff / avg_slope > 0.5:
@@ -738,9 +880,15 @@ def detect_flag_patterns(df_kline: pd.DataFrame) -> list[dict]:
                 if pole_vol_avg <= 0 or flag_vol_avg > pole_vol_avg * 0.6:
                     continue
 
-                # ===== K线实体是否穿越旗面通道超过 5% =====
-                if _body_crosses_channel(flag_start, flag_end, highs[flag_start], highs[flag_end - 1],
-                                        lows[flag_start], lows[flag_end - 1], df["open"].values, closes):
+                # ===== K线实体是否穿越旗面通道超过 5%（用收盘价趋势线） =====
+                flag_dur = flag_end - flag_start
+                upper_start = upper_line["intercept"]
+                upper_end = upper_line["slope"] * (flag_dur - 1) + upper_line["intercept"]
+                lower_start = lower_line["intercept"]
+                lower_end = lower_line["slope"] * (flag_dur - 1) + lower_line["intercept"]
+
+                if _body_crosses_channel(flag_start, flag_end, upper_start, upper_end,
+                                        lower_start, lower_end, df["open"].values, closes):
                     continue
 
                 # ===== 边界清晰度检查：旗面是否还能往后延伸 =====
@@ -765,6 +913,9 @@ def detect_flag_patterns(df_kline: pd.DataFrame) -> list[dict]:
                         best_flag = None
                         break  # 旗杆还能往前延伸，拒绝
 
+                # 旗杆最高点（旗面起点从顶端开始画）
+                pole_peak_idx = pole_start + int(highs[pole_start:pole_end + 1].argmax())
+
                 best_flag = {
                     "type": "上飘旗",
                     "pole_start": pole_start,
@@ -773,10 +924,13 @@ def detect_flag_patterns(df_kline: pd.DataFrame) -> list[dict]:
                     "flag_end": flag_end,
                     "pole_high": highs[pole_start:pole_end + 1].max(),
                     "pole_low": lows[pole_start:pole_end + 1].min(),
-                    "flag_high_start": highs[flag_start],
-                    "flag_high_end": highs[flag_end - 1],
-                    "flag_low_start": lows[flag_start],
-                    "flag_low_end": lows[flag_end - 1],
+                    # 收盘价趋势线参数（用于画线）
+                    "upper_slope": float(upper_line["slope"]),
+                    "upper_intercept": float(upper_line["intercept"]),
+                    "lower_slope": float(lower_line["slope"]),
+                    "lower_intercept": float(lower_line["intercept"]),
+                    "pole_peak_idx": int(pole_peak_idx),
+                    "pole_trough_idx": None,
                     "date_pole_start": dates[pole_start],
                     "date_pole_end": dates[pole_end],
                     "date_flag_start": dates[flag_start],
@@ -802,6 +956,26 @@ def detect_flag_patterns(df_kline: pd.DataFrame) -> list[dict]:
                 if avg_slope > 0 and slope_diff / avg_slope > 0.5:
                     continue
 
+                # ===== 用收盘价极值点重新拟合趋势线并验证（最少2个点，3个点更可靠） =====
+                close_highs_idx, close_lows_idx = _find_local_extrema(flag_closes)
+
+                if len(close_highs_idx) < 2 or len(close_lows_idx) < 2:
+                    continue
+
+                upper_line = _fit_trendline(flag_closes, close_highs_idx, expected_direction='up', tolerance=0.015)
+                lower_line = _fit_trendline(flag_closes, close_lows_idx, expected_direction='up', tolerance=0.015)
+
+                if upper_line is None or lower_line is None:
+                    continue
+
+                # 用收盘价拟合的斜率重新验证平行度
+                high_slope = upper_line["slope"]
+                low_slope = lower_line["slope"]
+                slope_diff = abs(high_slope - low_slope)
+                avg_slope = (abs(high_slope) + abs(low_slope)) / 2
+                if avg_slope > 0 and slope_diff / avg_slope > 0.5:
+                    continue
+
                 # 旗面期间价格不创新低（在旗杆低点上方运行）
                 if flag_lows.min() < lows[pole_start:pole_end + 1].min() * 1.02:
                     continue
@@ -812,9 +986,15 @@ def detect_flag_patterns(df_kline: pd.DataFrame) -> list[dict]:
                 if pole_vol_avg <= 0 or flag_vol_avg > pole_vol_avg * 0.6:
                     continue
 
-                # ===== K线实体是否穿越旗面通道超过 5% =====
-                if _body_crosses_channel(flag_start, flag_end, highs[flag_start], highs[flag_end - 1],
-                                        lows[flag_start], lows[flag_end - 1], df["open"].values, closes):
+                # ===== K线实体是否穿越旗面通道超过 5%（用收盘价趋势线） =====
+                flag_dur = flag_end - flag_start
+                upper_start = upper_line["intercept"]
+                upper_end = upper_line["slope"] * (flag_dur - 1) + upper_line["intercept"]
+                lower_start = lower_line["intercept"]
+                lower_end = lower_line["slope"] * (flag_dur - 1) + lower_line["intercept"]
+
+                if _body_crosses_channel(flag_start, flag_end, upper_start, upper_end,
+                                        lower_start, lower_end, df["open"].values, closes):
                     continue
 
                 # ===== 边界清晰度检查：旗面是否还能往后延伸 =====
@@ -839,6 +1019,9 @@ def detect_flag_patterns(df_kline: pd.DataFrame) -> list[dict]:
                         best_flag = None
                         break  # 旗杆还能往前延伸，拒绝
 
+                # 旗杆最低点（旗面起点从底端开始画）
+                pole_trough_idx = pole_start + int(lows[pole_start:pole_end + 1].argmin())
+
                 best_flag = {
                     "type": "下飘旗",
                     "pole_start": pole_start,
@@ -847,10 +1030,13 @@ def detect_flag_patterns(df_kline: pd.DataFrame) -> list[dict]:
                     "flag_end": flag_end,
                     "pole_high": highs[pole_start:pole_end + 1].max(),
                     "pole_low": lows[pole_start:pole_end + 1].min(),
-                    "flag_high_start": highs[flag_start],
-                    "flag_high_end": highs[flag_end - 1],
-                    "flag_low_start": lows[flag_start],
-                    "flag_low_end": lows[flag_end - 1],
+                    # 收盘价趋势线参数（用于画线）
+                    "upper_slope": float(upper_line["slope"]),
+                    "upper_intercept": float(upper_line["intercept"]),
+                    "lower_slope": float(lower_line["slope"]),
+                    "lower_intercept": float(lower_line["intercept"]),
+                    "pole_peak_idx": None,
+                    "pole_trough_idx": int(pole_trough_idx),
                     "date_pole_start": dates[pole_start],
                     "date_pole_end": dates[pole_end],
                     "date_flag_start": dates[flag_start],
@@ -947,8 +1133,50 @@ def detect_triangle_patterns(df_kline: pd.DataFrame) -> list[dict]:
         if not triangle_type:
             continue
 
-        # K线实体穿越检查（与旗形一致）
-        if _body_crosses_channel(start, end, high_start, high_end, low_start, low_end, opens, closes):
+        # ===== 用收盘价极值点重新拟合趋势线并验证（最少2个点，3个点更可靠） =====
+        close_highs_idx, close_lows_idx = _find_local_extrema(wc)
+
+        if len(close_highs_idx) < 2 or len(close_lows_idx) < 2:
+            continue
+
+        if triangle_type == "对称三角形":
+            upper_dir, lower_dir = 'down', 'up'
+        elif triangle_type == "上升三角形":
+            upper_dir, lower_dir = 'any', 'up'
+        else:  # 下降三角形
+            upper_dir, lower_dir = 'down', 'any'
+
+        upper_line = _fit_trendline(wc, close_highs_idx, expected_direction=upper_dir, tolerance=0.015)
+        lower_line = _fit_trendline(wc, close_lows_idx, expected_direction=lower_dir, tolerance=0.015)
+
+        if upper_line is None or lower_line is None:
+            continue
+
+        # 用收盘价拟合的斜率重新验证三角形类型
+        high_slope = upper_line["slope"]
+        low_slope = lower_line["slope"]
+        hsp = high_slope / avg_price
+        lsp = low_slope / avg_price
+
+        if triangle_type == "对称三角形":
+            if not (hsp < -0.0008 and lsp > 0.0008):
+                continue
+        elif triangle_type == "上升三角形":
+            if not (abs(hsp) < 0.0005 and lsp > 0.0008):
+                continue
+        else:  # 下降三角形
+            if not (hsp < -0.0008 and abs(lsp) < 0.0005):
+                continue
+
+        # K线实体穿越检查（用收盘价趋势线）
+        win_dur = end - start
+        tri_upper_start = upper_line["intercept"]
+        tri_upper_end = upper_line["slope"] * (win_dur - 1) + upper_line["intercept"]
+        tri_lower_start = lower_line["intercept"]
+        tri_lower_end = lower_line["slope"] * (win_dur - 1) + lower_line["intercept"]
+
+        if _body_crosses_channel(start, end, tri_upper_start, tri_upper_end,
+                                tri_lower_start, tri_lower_end, opens, closes):
             continue
 
         # 成交量检查：三角形期间应逐渐萎缩（后半段 <= 前半段的1.1倍）
@@ -963,10 +1191,11 @@ def detect_triangle_patterns(df_kline: pd.DataFrame) -> list[dict]:
             "type": triangle_type,
             "start": start,
             "end": end,
-            "high_start": float(high_start),
-            "high_end": float(high_end),
-            "low_start": float(low_start),
-            "low_end": float(low_end),
+            # 收盘价趋势线参数（用于画线）
+            "upper_slope": float(upper_line["slope"]),
+            "upper_intercept": float(upper_line["intercept"]),
+            "lower_slope": float(lower_line["slope"]),
+            "lower_intercept": float(lower_line["intercept"]),
             "date_start": dates[start],
             "date_end": dates[end - 1],
         })
@@ -1535,16 +1764,28 @@ if search_clicked or True:
                     st.session_state.kline_days = days
                     st.rerun()
 
-        # 第二排：显示图层按钮（均线、布林带、旗形、三角形收敛）
+        # 第二排：显示图层按钮（均线、布林带）
         st.markdown("<span style='font-size:12px;color:#666'>显示图层</span>", unsafe_allow_html=True)
-        ctrl_cols = st.columns([1.2, 1.2, 1.2, 1.2, 10])
+        ctrl_cols = st.columns([1.2, 1.2, 10])
         ctrl_items = [
             (ctrl_cols[0], "均线", "show_ma"),
             (ctrl_cols[1], "布林带", "show_boll"),
-            (ctrl_cols[2], "旗形", "show_flags"),
-            (ctrl_cols[3], "三角形收敛", "show_triangles"),
         ]
         for col, label, state_key in ctrl_items:
+            with col:
+                is_on = st.session_state[state_key]
+                if st.button(label, key=f"ctrl_{stock_code}_{state_key}", type="primary" if is_on else "secondary"):
+                    st.session_state[state_key] = not is_on
+                    st.rerun()
+
+        # 第三排：形态检测按钮（旗形、三角形收敛）
+        st.markdown("<span style='font-size:12px;color:#666'>形态检测</span>", unsafe_allow_html=True)
+        pattern_cols = st.columns([1.2, 1.2, 10])
+        pattern_items = [
+            (pattern_cols[0], "旗形", "show_flags"),
+            (pattern_cols[1], "三角形收敛", "show_triangles"),
+        ]
+        for col, label, state_key in pattern_items:
             with col:
                 is_on = st.session_state[state_key]
                 if st.button(label, key=f"ctrl_{stock_code}_{state_key}", type="primary" if is_on else "secondary"):
