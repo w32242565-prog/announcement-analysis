@@ -730,13 +730,17 @@ def _linear_slope(y_vals):
 
 def _body_crosses_channel(start, end, up_start, up_end, low_start, low_end, opens, closes):
     """
-    检查期间 K 线实体是否穿越通道边界超过 5%。
+    检查期间 K 线实体是否处于通道边界内。
+    要求至少 60% 的 K 线实体完全处于上下轨之间（含边界）。
     上轨 = 首高点 → 尾高点连线，下轨 = 首低点 → 尾低点连线。
-    返回 True 表示有穿越超过 5%，该形态不成立。
+    返回 True 表示处于通道内的比例不足 60%，该形态不成立。
     """
     dur = end - 1 - start
     if dur <= 0:
         return True
+
+    total = 0
+    inside = 0
     for j in range(start, end):
         ratio = (j - start) / dur
         upper = up_start + (up_end - up_start) * ratio
@@ -748,13 +752,16 @@ def _body_crosses_channel(start, end, up_start, up_end, low_start, low_end, open
         body_len = body_top - body_bottom
         if body_len <= 0:
             continue
-        # 上穿：实体上沿超出上轨且超出部分 > 实体长度 5%
-        if body_top > upper and (body_top - upper) > body_len * 0.05:
-            return True
-        # 下穿：实体下沿低于下轨且超出部分 > 实体长度 5%
-        if body_bottom < lower and (lower - body_bottom) > body_len * 0.05:
-            return True
-    return False
+        total += 1
+        # 实体完全处于通道内（含边界）
+        if body_top <= upper and body_bottom >= lower:
+            inside += 1
+
+    if total == 0:
+        return True
+
+    # 处于通道内的比例必须 >= 60%
+    return inside / total < 0.60
 
 
 def _find_local_extrema(vals, window=2):
@@ -2168,6 +2175,38 @@ else:
 
 st.divider()
 
+# --- 财务数据明细（akshare / 本地 CSV） ---
+st.subheader("📊 财务数据明细")
+with st.spinner("正在加载财务三表数据..."):
+    fin_statements = fetch_financial_statements(stock_code)
+    key_fin = extract_key_financials(
+        fin_statements["balance"],
+        fin_statements["profit"],
+        fin_statements["cashflow"],
+    )
+
+if key_fin:
+    fin_tabs = st.tabs(["资产负债表", "利润表", "现金流量表"])
+    with fin_tabs[0]:
+        if "balance" in key_fin and not key_fin["balance"].empty:
+            st.dataframe(key_fin["balance"], use_container_width=True, hide_index=True)
+        else:
+            st.info("未获取到资产负债表数据。")
+    with fin_tabs[1]:
+        if "profit" in key_fin and not key_fin["profit"].empty:
+            st.dataframe(key_fin["profit"], use_container_width=True, hide_index=True)
+        else:
+            st.info("未获取到利润表数据。")
+    with fin_tabs[2]:
+        if "cashflow" in key_fin and not key_fin["cashflow"].empty:
+            st.dataframe(key_fin["cashflow"], use_container_width=True, hide_index=True)
+        else:
+            st.info("未获取到现金流量表数据。")
+else:
+    st.info("未获取到财务三表数据（akshare 接口暂时不可用，且本地 CSV 未找到）。")
+
+st.divider()
+
 # --- 统计概览 ---
 st.subheader("📊 公告信号统计")
 sig_counts = df["ai_signal"].value_counts().to_dict()
@@ -2305,36 +2344,6 @@ if not df_fin_indicators.empty:
         st.info("财务指标数据格式不匹配，无法绘制趋势图。")
 else:
     st.info("未找到主要财务指标数据（08_主要财务指标.csv）。")
-
-# --- 财务数据明细（akshare / 本地 CSV） ---
-st.subheader("📊 财务数据明细")
-with st.spinner("正在加载财务三表数据..."):
-    fin_statements = fetch_financial_statements(stock_code)
-    key_fin = extract_key_financials(
-        fin_statements["balance"],
-        fin_statements["profit"],
-        fin_statements["cashflow"],
-    )
-
-if key_fin:
-    fin_tabs = st.tabs(["资产负债表", "利润表", "现金流量表"])
-    with fin_tabs[0]:
-        if "balance" in key_fin and not key_fin["balance"].empty:
-            st.dataframe(key_fin["balance"], use_container_width=True, hide_index=True)
-        else:
-            st.info("未获取到资产负债表数据。")
-    with fin_tabs[1]:
-        if "profit" in key_fin and not key_fin["profit"].empty:
-            st.dataframe(key_fin["profit"], use_container_width=True, hide_index=True)
-        else:
-            st.info("未获取到利润表数据。")
-    with fin_tabs[2]:
-        if "cashflow" in key_fin and not key_fin["cashflow"].empty:
-            st.dataframe(key_fin["cashflow"], use_container_width=True, hide_index=True)
-        else:
-            st.info("未获取到现金流量表数据。")
-else:
-    st.info("未获取到财务三表数据（akshare 接口暂时不可用，且本地 CSV 未找到）。")
 
 st.divider()
 
