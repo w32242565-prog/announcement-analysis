@@ -233,6 +233,67 @@ def convert_stock_code_for_baostock(stock_code: str) -> str:
         return f"sh.{stock_code}"
 
 
+def _decode_baostock_str(s):
+    """解码 baostock 返回的乱码字符串（GBK编码被误解析）"""
+    if not isinstance(s, str):
+        return s
+    try:
+        return s.encode("latin1").decode("gbk")
+    except Exception:
+        return s
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_company_info_from_baostock(stock_code: str) -> dict:
+    """
+    从 baostock 获取公司基本信息：名称、行业。
+    市值回退到本地 CSV（baostock 无市值接口）。
+    """
+    bs_code = convert_stock_code_for_baostock(stock_code)
+    result = {"stock_name": "", "industry": "", "total_market_cap": None}
+
+    try:
+        lg = bs.login()
+        if lg.error_code != "0":
+            return result
+
+        # 1. 查询名称
+        r1 = bs.query_stock_basic(code=bs_code)
+        if r1.error_code == "0":
+            while r1.next():
+                row = r1.get_row_data()
+                result["stock_name"] = _decode_baostock_str(row[1])
+
+        # 2. 查询行业
+        r2 = bs.query_stock_industry(code=bs_code)
+        if r2.error_code == "0":
+            while r2.next():
+                row = r2.get_row_data()
+                result["industry"] = _decode_baostock_str(row[3])
+
+        bs.logout()
+    except Exception:
+        pass
+
+    # 3. 回退：从本地 CSV 补全市值
+    csv_path = "01_公司基本信息/company_info.csv"
+    if os.path.exists(csv_path):
+        try:
+            df_csv = pd.read_csv(csv_path, encoding="utf-8-sig")
+            # 统一为6位字符串格式匹配（处理 CSV 中可能是 2340 或 002340 的情况）
+            df_csv["stock_code_str"] = df_csv["stock_code"].astype(str).str.zfill(6)
+            row = df_csv[df_csv["stock_code_str"] == stock_code]
+            if not row.empty:
+                cap = row.iloc[0].get("total_market_cap")
+                if pd.notna(cap):
+                    # CSV 中市值单位为元，转换为亿
+                    result["total_market_cap"] = float(cap) / 1e8
+        except Exception:
+            pass
+
+    return result
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_kline_from_baostock(stock_code: str, years: int = 8) -> pd.DataFrame:
     """从 baostock 获取近 N 年日线 K 线数据"""
@@ -1658,309 +1719,356 @@ def tag_badge(tag: str) -> str:
 st.title("📈 股票公告智能分析系统")
 st.caption("输入股票代码，自动获取最新公告并进行 AI 规则分类分析")
 
+# --- 搜索状态管理 ---
+if "active_stock_code" not in st.session_state:
+    st.session_state.active_stock_code = ""
+if "search_triggered" not in st.session_state:
+    st.session_state.search_triggered = False
+
 # --- 输入区 ---
 col1, col2 = st.columns([1, 4])
 with col1:
-    stock_code = st.text_input("股票代码", value="002340", max_chars=6)
+    stock_code_input = st.text_input(
+        "股票代码",
+        value=st.session_state.active_stock_code,
+        max_chars=6,
+        placeholder="如 002340",
+    )
 with col2:
     st.write("")
     st.write("")
     search_clicked = st.button("🔍 查询公告", type="primary", use_container_width=False)
 
-if not stock_code or not re.match(r"^\d{6}$", stock_code.strip()):
-    st.warning("请输入 6 位数字股票代码（如 002340、600031）")
+# 点击查询时更新 session state
+if search_clicked:
+    st.session_state.active_stock_code = stock_code_input.strip()
+    st.session_state.search_triggered = True
+    st.rerun()
+
+# 未查询时显示空白搜索页
+if not st.session_state.search_triggered:
+    st.info("请输入 6 位数字股票代码（如 002340、600031），点击「查询公告」按钮开始分析。")
     st.stop()
 
-stock_code = stock_code.strip()
+stock_code = st.session_state.active_stock_code
+if not stock_code or not re.match(r"^\d{6}$", stock_code):
+    st.warning("请输入正确的 6 位数字股票代码")
+    st.session_state.search_triggered = False
+    st.stop()
 
 # --- 数据加载 ---
-if search_clicked or True:
-    with st.spinner(f"正在加载 {stock_code} 的公告数据..."):
-        # 先查本地数据库（含 AI 深度分析结果）
-        df_local = fetch_announcements_from_db(stock_code)
+with st.spinner(f"正在加载 {stock_code} 的公告数据..."):
+    # 先查本地数据库（含 AI 深度分析结果）
+    df_local = fetch_announcements_from_db(stock_code)
 
-        # 再查 API（获取最新数据）
-        df_api = fetch_announcements_from_api(stock_code, page_size=50)
+    # 再查 API（获取最新数据）
+    df_api = fetch_announcements_from_api(stock_code, page_size=50)
 
-        if df_api.empty and df_local.empty:
-            st.error(f"未找到股票 {stock_code} 的公告数据，请检查代码是否正确。")
-            st.stop()
+    if df_api.empty and df_local.empty:
+        st.error(f"未找到股票 {stock_code} 的公告数据，请检查代码是否正确。")
+        st.stop()
 
-        # 合并：API 数据做基础，本地数据补充 AI 分析字段
-        if not df_api.empty and not df_local.empty:
-            df_api = df_api.merge(
-                df_local[["title", "ai_tag", "ai_summary", "ai_signal", "ai_reason"]].drop_duplicates("title"),
-                on="title",
-                how="left",
-            )
-            df = df_api
-        elif not df_api.empty:
-            df = df_api
-        else:
-            df = df_local
-
-        # 对缺少 AI 标签的行进行规则分类
-        for idx, row in df.iterrows():
-            if pd.isna(row.get("ai_tag")) or row.get("ai_tag") == "":
-                tag, signal = rule_classify(row["title"], row.get("content_preview", ""))
-                df.at[idx, "ai_tag"] = tag
-                df.at[idx, "ai_signal"] = signal
-
-        df = df.sort_values("announce_date", ascending=False).reset_index(drop=True)
-
-    # --- 公司信息卡片 ---
-    company = get_company_info(stock_code)
-    name = company.get("stock_name") or (df["stock_name"].iloc[0] if not df.empty else "")
-
-    info_cols = st.columns(4)
-    with info_cols[0]:
-        st.metric("股票代码", stock_code)
-    with info_cols[1]:
-        st.metric("公司名称", name or "—")
-    with info_cols[2]:
-        st.metric("所属行业", company.get("industry") or "—")
-    with info_cols[3]:
-        cap = company.get("total_market_cap")
-        st.metric("总市值", f"{cap:,.0f} 亿" if cap else "—")
-
-    st.divider()
-
-    # --- K 线走势图 ---
-    st.subheader("📈 近8年 K 线走势（前复权）")
-    with st.spinner("正在从 baostock 获取 K 线数据..."):
-        df_kline = fetch_kline_from_baostock(stock_code, years=8)
-    if not df_kline.empty:
-        # 初始化 session state（默认显示近3年）
-        if "kline_days" not in st.session_state:
-            st.session_state.kline_days = 1095
-
-        # 初始化显示控制 session state
-        if "show_ma" not in st.session_state:
-            st.session_state.show_ma = True
-        if "show_boll" not in st.session_state:
-            st.session_state.show_boll = False
-        if "show_flags" not in st.session_state:
-            st.session_state.show_flags = False
-        if "show_triangles" not in st.session_state:
-            st.session_state.show_triangles = False
-
-        # 注入 CSS：按钮贴住 + 文字横排不换行
-        st.markdown("""
-        <style>
-        div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
-            padding-left: 2px !important;
-            padding-right: 2px !important;
-        }
-        button[kind="primary"] p, button[kind="secondary"] p {
-            white-space: nowrap !important;
-        }
-        </style>
-        """, unsafe_allow_html=True)
-
-        # 第一排：时间范围按钮
-        st.markdown("<span style='font-size:12px;color:#666'>时间范围</span>", unsafe_allow_html=True)
-        btn_cols = st.columns([1, 1, 1, 1, 1, 1, 1, 1, 10])
-        ranges = [
-            (btn_cols[0], "5日", 5),
-            (btn_cols[1], "10日", 10),
-            (btn_cols[2], "30日", 30),
-            (btn_cols[3], "90日", 90),
-            (btn_cols[4], "1年", 365),
-            (btn_cols[5], "3年", 1095),
-            (btn_cols[6], "5年", 1825),
-            (btn_cols[7], "全部", None),
-        ]
-        for col, label, days in ranges:
-            with col:
-                is_active = st.session_state.kline_days == days
-                if st.button(label, key=f"kline_{stock_code}_{days}", type="primary" if is_active else "secondary", use_container_width=True):
-                    st.session_state.kline_days = days
-                    st.rerun()
-
-        # 第二排：显示图层按钮（均线、布林带）
-        st.markdown("<span style='font-size:12px;color:#666'>显示图层</span>", unsafe_allow_html=True)
-        ctrl_cols = st.columns([1, 1, 10])
-        ctrl_items = [
-            (ctrl_cols[0], "均线", "show_ma"),
-            (ctrl_cols[1], "布林带", "show_boll"),
-        ]
-        for col, label, state_key in ctrl_items:
-            with col:
-                is_on = st.session_state[state_key]
-                if st.button(label, key=f"ctrl_{stock_code}_{state_key}", type="primary" if is_on else "secondary", use_container_width=True):
-                    st.session_state[state_key] = not is_on
-                    st.rerun()
-
-        # 第三排：形态检测按钮（旗形、三角形收敛）
-        st.markdown("<span style='font-size:12px;color:#666'>形态检测</span>", unsafe_allow_html=True)
-        pattern_cols = st.columns([1, 1, 10])
-        pattern_items = [
-            (pattern_cols[0], "旗形", "show_flags"),
-            (pattern_cols[1], "三角形收敛", "show_triangles"),
-        ]
-        for col, label, state_key in pattern_items:
-            with col:
-                is_on = st.session_state[state_key]
-                if st.button(label, key=f"ctrl_{stock_code}_{state_key}", type="primary" if is_on else "secondary", use_container_width=True):
-                    st.session_state[state_key] = not is_on
-                    st.rerun()
-
-        # 形态检测（仅在开启时计算）
-        flags = detect_flag_patterns(df_kline) if st.session_state.show_flags else []
-        triangles = detect_triangle_patterns(df_kline) if st.session_state.show_triangles else []
-
-        fig_kline = plot_kline(
-            df_kline,
-            stock_name=name or stock_code,
-            days=st.session_state.kline_days,
-            flags=flags,
-            triangles=triangles,
-            show_ma=st.session_state.show_ma,
-            show_boll=st.session_state.show_boll,
-            show_flags=st.session_state.show_flags,
-            show_triangles=st.session_state.show_triangles,
+    # 合并：API 数据做基础，本地数据补充 AI 分析字段
+    if not df_api.empty and not df_local.empty:
+        df_api = df_api.merge(
+            df_local[["title", "ai_tag", "ai_summary", "ai_signal", "ai_reason"]].drop_duplicates("title"),
+            on="title",
+            how="left",
         )
-        st.plotly_chart(fig_kline, use_container_width=True)
-
-        # 旗形检测结果展示（仅在开启时显示）
-        if st.session_state.show_flags:
-            st.markdown("<span style='font-size:13px'>**🚩 旗形形态检测**</span>", unsafe_allow_html=True)
-            if flags:
-                for f in flags:
-                    d_ps = pd.to_datetime(f["date_pole_start"]).strftime("%Y-%m-%d")
-                    d_pe = pd.to_datetime(f["date_pole_end"]).strftime("%Y-%m-%d")
-                    d_fs = pd.to_datetime(f["date_flag_start"]).strftime("%Y-%m-%d")
-                    d_fe = pd.to_datetime(f["date_flag_end"]).strftime("%Y-%m-%d")
-                    if f["type"] == "上飘旗":
-                        st.success(
-                            f"检测到 **上飘旗**（看涨信号）："
-                            f"旗杆期 {d_ps} → {d_pe} 急速拉升，"
-                            f"随后 {d_fs} → {d_fe} 缩量向下整理，"
-                            f"关注放量突破旗面上轨后的跟进机会。"
-                        )
-                    else:
-                        st.error(
-                            f"检测到 **下飘旗**（看跌信号）："
-                            f"旗杆期 {d_ps} → {d_pe} 急速杀跌，"
-                            f"随后 {d_fs} → {d_fe} 缩量向上整理，"
-                            f"警惕放量跌破旗面下轨后的持续下跌风险。"
-                        )
-            else:
-                st.info("没有检测到旗形形态。")
-
-        # 三角形收敛形态检测展示（仅在开启时显示）
-        if st.session_state.show_triangles:
-            st.markdown("<span style='font-size:13px'>**🔺 三角形收敛形态检测**</span>", unsafe_allow_html=True)
-            if triangles:
-                for tri in triangles:
-                    d_s = pd.to_datetime(tri["date_start"]).strftime("%Y-%m-%d")
-                    d_e = pd.to_datetime(tri["date_end"]).strftime("%Y-%m-%d")
-                    if tri["type"] == "对称三角形":
-                        st.info(
-                            f"检测到 **对称三角形**（中性）："
-                            f"{d_s} → {d_e} 期间高点不断降低、低点不断抬高，多空力量趋于均衡；"
-                            f"突破上轨 → 看涨，跌破下轨 → 看跌，突破时需放量确认。"
-                        )
-                    elif tri["type"] == "上升三角形":
-                        st.success(
-                            f"检测到 **上升三角形**（看涨偏多）："
-                            f"{d_s} → {d_e} 期间上轨水平、下轨抬高，买方力量渐强；"
-                            f"放量突破水平阻力线 → 强烈看涨信号。"
-                        )
-                    else:  # 下降三角形
-                        st.error(
-                            f"检测到 **下降三角形**（看跌偏多）："
-                            f"{d_s} → {d_e} 期间上轨下倾、下轨水平，卖方力量渐强；"
-                            f"放量跌破水平支撑线 → 强烈看跌信号。"
-                        )
-            else:
-                st.info("没有检测到三角形收敛形态。")
-
-        # 技术面分析
-        tech = analyze_kline_tech(df_kline)
-        if tech:
-            st.markdown("<span style='font-size:13px'>**📐 技术面诊断**</span>", unsafe_allow_html=True)
-            tech_cols = st.columns(3)
-            with tech_cols[0]:
-                if tech["ma_trend"] == "多头排列":
-                    st.metric("均线排列", tech["ma_trend"], tech["ma_desc"], delta_color="inverse")
-                elif tech["ma_trend"] == "空头排列":
-                    st.metric("均线排列", tech["ma_trend"], tech["ma_desc"])
-                else:
-                    st.metric("均线排列", tech["ma_trend"], tech["ma_desc"])
-                st.caption(f"MA5:{tech['ma5']}  MA10:{tech['ma10']}  MA20:{tech['ma20']}")
-            with tech_cols[1]:
-                vp_color = "normal"
-                if "放量" in tech["vol_status"]:
-                    vp_color = "inverse"
-                st.metric("成交量", tech["vol_status"], f"{tech['vol_desc']}（{tech['vol_ratio']}）", delta_color=vp_color)
-                st.caption(f"当日:{tech['vol']}  5日均:{tech['vol_ma5']}  20日均:{tech['vol_ma20']}")
-            with tech_cols[2]:
-                if "上涨" in tech["vol_price"]:
-                    st.metric("量价关系", tech["vol_price"], tech["vp_desc"], delta_color="inverse")
-                else:
-                    st.metric("量价关系", tech["vol_price"], tech["vp_desc"])
-
-        kline_cols = st.columns(4)
-        latest = df_kline.iloc[-1]
-        prev = df_kline.iloc[-2] if len(df_kline) > 1 else latest
-        kline_cols[0].metric("最新收盘价", f"{latest['close']:.2f}", f"{(latest['close'] - prev['close']):.2f}")
-        # 计算20日平均成交额
-        amount_ma20 = df_kline["amount"].tail(20).mean()
-        kline_cols[1].metric("成交额", f"{latest['amount']/1e8:.2f} 亿")
-        kline_cols[1].caption(f"20日均: {amount_ma20/1e8:.2f} 亿")
-        kline_cols[2].metric("换手率", f"{latest['turn']:.2f}%")
-        kline_cols[3].metric("8年涨跌幅", f"{((latest['close'] / df_kline.iloc[0]['close'] - 1) * 100):.2f}%")
+        df = df_api
+    elif not df_api.empty:
+        df = df_api
     else:
-        st.info("未获取到 K 线数据，请检查网络或股票代码。")
+        df = df_local
 
-    st.divider()
+    # 对缺少 AI 标签的行进行规则分类
+    for idx, row in df.iterrows():
+        if pd.isna(row.get("ai_tag")) or row.get("ai_tag") == "":
+            tag, signal = rule_classify(row["title"], row.get("content_preview", ""))
+            df.at[idx, "ai_tag"] = tag
+            df.at[idx, "ai_signal"] = signal
 
-    # --- 统计概览 ---
-    st.subheader("📊 公告信号统计")
-    sig_counts = df["ai_signal"].value_counts().to_dict()
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("总公告数", len(df))
-    c2.metric("利好", sig_counts.get("利好", 0), delta_color="inverse")
-    c3.metric("利空", sig_counts.get("利空", 0), delta_color="inverse")
-    c4.metric("中性", sig_counts.get("中性", 0))
+    df = df.sort_values("announce_date", ascending=False).reset_index(drop=True)
 
-    # 分类分布
-    tag_counts = df["ai_tag"].value_counts().head(10)
-    chart_col, table_col = st.columns([1, 1])
-    with chart_col:
-        st.bar_chart(tag_counts, use_container_width=True, height=250)
-    with table_col:
-        st.dataframe(
-            tag_counts.reset_index().rename(columns={"index": "分类", "ai_tag": "数量"}),
-            use_container_width=True,
-            hide_index=True,
-        )
+# --- 公司信息卡片（优先用 baostock，回退到数据库） ---
+company = get_company_info_from_baostock(stock_code)
+if not company.get("stock_name"):
+    company = get_company_info(stock_code)
 
-    st.divider()
+name = company.get("stock_name") or (df["stock_name"].iloc[0] if not df.empty else "")
+industry = company.get("industry") or "—"
+cap = company.get("total_market_cap")
+cap_str = f"{cap:,.0f} 亿" if cap else "—"
 
-    # --- 公告列表 ---
-    st.subheader(f"📋 最近公告列表（共 {len(df)} 条）")
+info_cols = st.columns(4)
+with info_cols[0]:
+    st.metric("股票代码", stock_code)
+with info_cols[1]:
+    st.metric("公司名称", name or "—")
+with info_cols[2]:
+    st.metric("所属行业", industry)
+with info_cols[3]:
+    st.metric("总市值", cap_str)
 
-    # 筛选器
-    filter_col1, filter_col2 = st.columns([1, 3])
-    with filter_col1:
-        signal_filter = st.selectbox("筛选信号", ["全部", "利好", "利空", "中性"])
-    with filter_col2:
-        search_title = st.text_input("搜索标题关键词", placeholder="输入关键词筛选公告...")
+st.divider()
 
-    filtered_df = df.copy()
-    if signal_filter != "全部":
-        filtered_df = filtered_df[filtered_df["ai_signal"] == signal_filter]
-    if search_title:
-        filtered_df = filtered_df[filtered_df["title"].str.contains(search_title, case=False, na=False)]
+# --- K 线走势图 ---
+st.subheader("📈 近8年 K 线走势（前复权）")
+with st.spinner("正在从 baostock 获取 K 线数据..."):
+    df_kline = fetch_kline_from_baostock(stock_code, years=8)
+if not df_kline.empty:
+    # 初始化 session state（默认显示近3年）
+    if "kline_days" not in st.session_state:
+        st.session_state.kline_days = 1095
 
-    # 展示表格
-    display_df = filtered_df[["announce_date", "title", "ai_tag", "ai_signal"]].copy()
-    display_df.columns = ["日期", "公告标题", "AI分类", "信号"]
+    # 初始化显示控制 session state
+    if "show_ma" not in st.session_state:
+        st.session_state.show_ma = True
+    if "show_boll" not in st.session_state:
+        st.session_state.show_boll = False
+    if "show_flags" not in st.session_state:
+        st.session_state.show_flags = False
+    if "show_triangles" not in st.session_state:
+        st.session_state.show_triangles = False
 
+    # 注入 CSS：按钮贴住 + 文字横排不换行
+    st.markdown("""
+    <style>
+    div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+        padding-left: 2px !important;
+        padding-right: 2px !important;
+    }
+    button[kind="primary"] p, button[kind="secondary"] p {
+        white-space: nowrap !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    # 第一排：时间范围按钮
+    st.markdown("<span style='font-size:12px;color:#666'>时间范围</span>", unsafe_allow_html=True)
+    btn_cols = st.columns([1, 1, 1, 1, 1, 1, 1, 1, 10])
+    ranges = [
+        (btn_cols[0], "5日", 5),
+        (btn_cols[1], "10日", 10),
+        (btn_cols[2], "30日", 30),
+        (btn_cols[3], "90日", 90),
+        (btn_cols[4], "1年", 365),
+        (btn_cols[5], "3年", 1095),
+        (btn_cols[6], "5年", 1825),
+        (btn_cols[7], "全部", None),
+    ]
+    for col, label, days in ranges:
+        with col:
+            is_active = st.session_state.kline_days == days
+            if st.button(label, key=f"kline_{stock_code}_{days}", type="primary" if is_active else "secondary", use_container_width=True):
+                st.session_state.kline_days = days
+                st.rerun()
+
+    # 第二排：显示图层按钮（均线、布林带）
+    st.markdown("<span style='font-size:12px;color:#666'>显示图层</span>", unsafe_allow_html=True)
+    ctrl_cols = st.columns([1, 1, 10])
+    ctrl_items = [
+        (ctrl_cols[0], "均线", "show_ma"),
+        (ctrl_cols[1], "布林带", "show_boll"),
+    ]
+    for col, label, state_key in ctrl_items:
+        with col:
+            is_on = st.session_state[state_key]
+            if st.button(label, key=f"ctrl_{stock_code}_{state_key}", type="primary" if is_on else "secondary", use_container_width=True):
+                st.session_state[state_key] = not is_on
+                st.rerun()
+
+    # 第三排：形态检测按钮（旗形、三角形收敛）
+    st.markdown("<span style='font-size:12px;color:#666'>形态检测</span>", unsafe_allow_html=True)
+    pattern_cols = st.columns([1, 1, 10])
+    pattern_items = [
+        (pattern_cols[0], "旗形", "show_flags"),
+        (pattern_cols[1], "三角形收敛", "show_triangles"),
+    ]
+    for col, label, state_key in pattern_items:
+        with col:
+            is_on = st.session_state[state_key]
+            if st.button(label, key=f"ctrl_{stock_code}_{state_key}", type="primary" if is_on else "secondary", use_container_width=True):
+                st.session_state[state_key] = not is_on
+                st.rerun()
+
+    # 形态检测（仅在开启时计算）
+    flags = detect_flag_patterns(df_kline) if st.session_state.show_flags else []
+    triangles = detect_triangle_patterns(df_kline) if st.session_state.show_triangles else []
+
+    fig_kline = plot_kline(
+        df_kline,
+        stock_name=name or stock_code,
+        days=st.session_state.kline_days,
+        flags=flags,
+        triangles=triangles,
+        show_ma=st.session_state.show_ma,
+        show_boll=st.session_state.show_boll,
+        show_flags=st.session_state.show_flags,
+        show_triangles=st.session_state.show_triangles,
+    )
+    st.plotly_chart(fig_kline, use_container_width=True)
+
+    # 旗形检测结果展示（仅在开启时显示）
+    if st.session_state.show_flags:
+        st.markdown("<span style='font-size:13px'>**🚩 旗形形态检测**</span>", unsafe_allow_html=True)
+        if flags:
+            for f in flags:
+                d_ps = pd.to_datetime(f["date_pole_start"]).strftime("%Y-%m-%d")
+                d_pe = pd.to_datetime(f["date_pole_end"]).strftime("%Y-%m-%d")
+                d_fs = pd.to_datetime(f["date_flag_start"]).strftime("%Y-%m-%d")
+                d_fe = pd.to_datetime(f["date_flag_end"]).strftime("%Y-%m-%d")
+                if f["type"] == "上飘旗":
+                    st.success(
+                        f"检测到 **上飘旗**（看涨信号）："
+                        f"旗杆期 {d_ps} → {d_pe} 急速拉升，"
+                        f"随后 {d_fs} → {d_fe} 缩量向下整理，"
+                        f"关注放量突破旗面上轨后的跟进机会。"
+                    )
+                else:
+                    st.error(
+                        f"检测到 **下飘旗**（看跌信号）："
+                        f"旗杆期 {d_ps} → {d_pe} 急速杀跌，"
+                        f"随后 {d_fs} → {d_fe} 缩量向上整理，"
+                        f"警惕放量跌破旗面下轨后的持续下跌风险。"
+                    )
+        else:
+            st.info("没有检测到旗形形态。")
+
+    # 三角形收敛形态检测展示（仅在开启时显示）
+    if st.session_state.show_triangles:
+        st.markdown("<span style='font-size:13px'>**🔺 三角形收敛形态检测**</span>", unsafe_allow_html=True)
+        if triangles:
+            for tri in triangles:
+                d_s = pd.to_datetime(tri["date_start"]).strftime("%Y-%m-%d")
+                d_e = pd.to_datetime(tri["date_end"]).strftime("%Y-%m-%d")
+                if tri["type"] == "对称三角形":
+                    st.info(
+                        f"检测到 **对称三角形**（中性）："
+                        f"{d_s} → {d_e} 期间高点不断降低、低点不断抬高，多空力量趋于均衡；"
+                        f"突破上轨 → 看涨，跌破下轨 → 看跌，突破时需放量确认。"
+                    )
+                elif tri["type"] == "上升三角形":
+                    st.success(
+                        f"检测到 **上升三角形**（看涨偏多）："
+                        f"{d_s} → {d_e} 期间上轨水平、下轨抬高，买方力量渐强；"
+                        f"放量突破水平阻力线 → 强烈看涨信号。"
+                    )
+                else:  # 下降三角形
+                    st.error(
+                        f"检测到 **下降三角形**（看跌偏多）："
+                        f"{d_s} → {d_e} 期间上轨下倾、下轨水平，卖方力量渐强；"
+                        f"放量跌破水平支撑线 → 强烈看跌信号。"
+                    )
+        else:
+            st.info("没有检测到三角形收敛形态。")
+
+    # 技术面分析
+    tech = analyze_kline_tech(df_kline)
+    if tech:
+        st.markdown("<span style='font-size:13px'>**📐 技术面诊断**</span>", unsafe_allow_html=True)
+        tech_cols = st.columns(3)
+        with tech_cols[0]:
+            if tech["ma_trend"] == "多头排列":
+                st.metric("均线排列", tech["ma_trend"], tech["ma_desc"], delta_color="inverse")
+            elif tech["ma_trend"] == "空头排列":
+                st.metric("均线排列", tech["ma_trend"], tech["ma_desc"])
+            else:
+                st.metric("均线排列", tech["ma_trend"], tech["ma_desc"])
+            st.caption(f"MA5:{tech['ma5']}  MA10:{tech['ma10']}  MA20:{tech['ma20']}")
+        with tech_cols[1]:
+            vp_color = "normal"
+            if "放量" in tech["vol_status"]:
+                vp_color = "inverse"
+            st.metric("成交量", tech["vol_status"], f"{tech['vol_desc']}（{tech['vol_ratio']}）", delta_color=vp_color)
+            st.caption(f"当日:{tech['vol']}  5日均:{tech['vol_ma5']}  20日均:{tech['vol_ma20']}")
+        with tech_cols[2]:
+            if "上涨" in tech["vol_price"]:
+                st.metric("量价关系", tech["vol_price"], tech["vp_desc"], delta_color="inverse")
+            else:
+                st.metric("量价关系", tech["vol_price"], tech["vp_desc"])
+
+    kline_cols = st.columns(4)
+    latest = df_kline.iloc[-1]
+    prev = df_kline.iloc[-2] if len(df_kline) > 1 else latest
+    kline_cols[0].metric("最新收盘价", f"{latest['close']:.2f}", f"{(latest['close'] - prev['close']):.2f}")
+    # 计算20日平均成交额
+    amount_ma20 = df_kline["amount"].tail(20).mean()
+    kline_cols[1].metric("成交额", f"{latest['amount']/1e8:.2f} 亿")
+    kline_cols[1].caption(f"20日均: {amount_ma20/1e8:.2f} 亿")
+    kline_cols[2].metric("换手率", f"{latest['turn']:.2f}%")
+    kline_cols[3].metric("8年涨跌幅", f"{((latest['close'] / df_kline.iloc[0]['close'] - 1) * 100):.2f}%")
+else:
+    st.info("未获取到 K 线数据，请检查网络或股票代码。")
+
+st.divider()
+
+# --- 统计概览 ---
+st.subheader("📊 公告信号统计")
+sig_counts = df["ai_signal"].value_counts().to_dict()
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("总公告数", len(df))
+c2.metric("利好", sig_counts.get("利好", 0), delta_color="inverse")
+c3.metric("利空", sig_counts.get("利空", 0), delta_color="inverse")
+c4.metric("中性", sig_counts.get("中性", 0))
+
+# 分类分布
+tag_counts = df["ai_tag"].value_counts().head(10)
+chart_col, table_col = st.columns([1, 1])
+with chart_col:
+    st.bar_chart(tag_counts, use_container_width=True, height=250)
+with table_col:
     st.dataframe(
-        display_df,
+        tag_counts.reset_index().rename(columns={"index": "分类", "ai_tag": "数量"}),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+st.divider()
+
+# --- 公告列表 ---
+st.subheader(f"📋 最近公告列表（共 {len(df)} 条）")
+
+# 筛选器
+filter_col1, filter_col2 = st.columns([1, 3])
+with filter_col1:
+    signal_filter = st.selectbox("筛选信号", ["全部", "利好", "利空", "中性"])
+with filter_col2:
+    search_title = st.text_input("搜索标题关键词", placeholder="输入关键词筛选公告...")
+
+filtered_df = df.copy()
+if signal_filter != "全部":
+    filtered_df = filtered_df[filtered_df["ai_signal"] == signal_filter]
+if search_title:
+    filtered_df = filtered_df[filtered_df["title"].str.contains(search_title, case=False, na=False)]
+
+# 展示表格
+display_df = filtered_df[["announce_date", "title", "ai_tag", "ai_signal"]].copy()
+display_df.columns = ["日期", "公告标题", "AI分类", "信号"]
+
+st.dataframe(
+    display_df,
+    use_container_width=True,
+    hide_index=True,
+    column_config={
+        "日期": st.column_config.DateColumn("日期", format="YYYY-MM-DD"),
+        "公告标题": st.column_config.TextColumn("公告标题", width="large"),
+        "AI分类": st.column_config.TextColumn("AI分类", width="medium"),
+        "信号": st.column_config.TextColumn("信号", width="small"),
+    },
+)
+
+st.divider()
+
+# --- 财报公告专区 ---
+st.subheader("📑 财报公告专区")
+df_finance = df[df["title"].apply(is_financial_report)].copy()
+if not df_finance.empty:
+    st.markdown(f"检测到 **{len(df_finance)}** 条财报相关公告，已单独列出：")
+    fin_display = df_finance[["announce_date", "title", "ai_tag", "ai_signal"]].copy()
+    fin_display.columns = ["日期", "公告标题", "AI分类", "信号"]
+    st.dataframe(
+        fin_display,
         use_container_width=True,
         hide_index=True,
         column_config={
@@ -1970,125 +2078,104 @@ if search_clicked or True:
             "信号": st.column_config.TextColumn("信号", width="small"),
         },
     )
+else:
+    st.info("未检测到财报相关公告。")
 
-    st.divider()
+# --- 关键财务指标趋势 ---
+st.subheader("💰 关键财务指标趋势")
+df_fin_indicators = get_financial_indicators(stock_code)
+if not df_fin_indicators.empty:
+    # 指标名称在第一列（'选项'）和第二列（'指标'），后续列为日期
+    # 提取常用指标行
+    indicators_of_interest = {
+        "归母净利润": "归母净利润（元）",
+        "营业总收入": "营业总收入（元）",
+        "营业成本": "营业成本（元）",
+        "净利润": "净利润（元）",
+    }
+    date_cols = [c for c in df_fin_indicators.columns if re.match(r"^\d{8}$", str(c))]
+    date_cols_sorted = sorted(date_cols, reverse=True)[:16]  # 最近16期（约4年季度数据）
+    date_cols_sorted = sorted(date_cols_sorted)  # 再按时间正序排
 
-    # --- 财报公告专区 ---
-    st.subheader("📑 财报公告专区")
-    df_finance = df[df["title"].apply(is_financial_report)].copy()
-    if not df_finance.empty:
-        st.markdown(f"检测到 **{len(df_finance)}** 条财报相关公告，已单独列出：")
-        fin_display = df_finance[["announce_date", "title", "ai_tag", "ai_signal"]].copy()
-        fin_display.columns = ["日期", "公告标题", "AI分类", "信号"]
-        st.dataframe(
-            fin_display,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "日期": st.column_config.DateColumn("日期", format="YYYY-MM-DD"),
-                "公告标题": st.column_config.TextColumn("公告标题", width="large"),
-                "AI分类": st.column_config.TextColumn("AI分类", width="medium"),
-                "信号": st.column_config.TextColumn("信号", width="small"),
-            },
-        )
-    else:
-        st.info("未检测到财报相关公告。")
-
-    # --- 关键财务指标趋势 ---
-    st.subheader("💰 关键财务指标趋势")
-    df_fin_indicators = get_financial_indicators(stock_code)
-    if not df_fin_indicators.empty:
-        # 指标名称在第一列（'选项'）和第二列（'指标'），后续列为日期
-        # 提取常用指标行
-        indicators_of_interest = {
-            "归母净利润": "归母净利润（元）",
-            "营业总收入": "营业总收入（元）",
-            "营业成本": "营业成本（元）",
-            "净利润": "净利润（元）",
-        }
-        date_cols = [c for c in df_fin_indicators.columns if re.match(r"^\d{8}$", str(c))]
-        date_cols_sorted = sorted(date_cols, reverse=True)[:16]  # 最近16期（约4年季度数据）
-        date_cols_sorted = sorted(date_cols_sorted)  # 再按时间正序排
-
-        fig_fin = go.Figure()
-        colors = ["#d32f2f", "#1976d2", "#388e3c", "#f57c00"]
-        color_idx = 0
-        for ind_name, label in indicators_of_interest.items():
-            row = df_fin_indicators[df_fin_indicators["指标"] == ind_name]
-            if row.empty:
-                continue
-            values = []
-            x_labels = []
-            for d in date_cols_sorted:
-                val = row.iloc[0].get(d)
-                if pd.notna(val):
-                    try:
-                        values.append(float(val))
-                        x_labels.append(f"{d[:4]}-{d[4:6]}")
-                    except (ValueError, TypeError):
-                        pass
-            if values:
-                # 亿元转换
-                values_yi = [v / 1e8 for v in values]
-                fig_fin.add_trace(
-                    go.Scatter(
-                        x=x_labels, y=values_yi, mode="lines+markers",
-                        name=label, line=dict(color=colors[color_idx % len(colors)], width=2),
-                    )
+    fig_fin = go.Figure()
+    colors = ["#d32f2f", "#1976d2", "#388e3c", "#f57c00"]
+    color_idx = 0
+    for ind_name, label in indicators_of_interest.items():
+        row = df_fin_indicators[df_fin_indicators["指标"] == ind_name]
+        if row.empty:
+            continue
+        values = []
+        x_labels = []
+        for d in date_cols_sorted:
+            val = row.iloc[0].get(d)
+            if pd.notna(val):
+                try:
+                    values.append(float(val))
+                    x_labels.append(f"{d[:4]}-{d[4:6]}")
+                except (ValueError, TypeError):
+                    pass
+        if values:
+            # 亿元转换
+            values_yi = [v / 1e8 for v in values]
+            fig_fin.add_trace(
+                go.Scatter(
+                    x=x_labels, y=values_yi, mode="lines+markers",
+                    name=label, line=dict(color=colors[color_idx % len(colors)], width=2),
                 )
-                color_idx += 1
-
-        if fig_fin.data:
-            fig_fin.update_layout(
-                height=400,
-                xaxis_title="报告期",
-                yaxis_title="金额（亿元）",
-                hovermode="x unified",
-                legend=dict(orientation="h", yanchor="bottom", y=0.02, xanchor="right", x=0.99),
-                margin=dict(l=40, r=40, t=60, b=40),
-                template="plotly_white",
             )
-            st.plotly_chart(fig_fin, use_container_width=True)
-        else:
-            st.info("财务指标数据格式不匹配，无法绘制趋势图。")
+            color_idx += 1
+
+    if fig_fin.data:
+        fig_fin.update_layout(
+            height=400,
+            xaxis_title="报告期",
+            yaxis_title="金额（亿元）",
+            hovermode="x unified",
+            legend=dict(orientation="h", yanchor="bottom", y=0.02, xanchor="right", x=0.99),
+            margin=dict(l=40, r=40, t=60, b=40),
+            template="plotly_white",
+        )
+        st.plotly_chart(fig_fin, use_container_width=True)
     else:
-        st.info("未找到主要财务指标数据（08_主要财务指标.csv）。")
+        st.info("财务指标数据格式不匹配，无法绘制趋势图。")
+else:
+    st.info("未找到主要财务指标数据（08_主要财务指标.csv）。")
 
-    st.divider()
+st.divider()
 
-    # --- 逐条详情（可展开） ---
-    st.subheader("🔍 公告详情与 AI 分析")
-    for idx, row in filtered_df.head(20).iterrows():
-        with st.expander(f"[{row['announce_date']}] {row['title']}"):
-            cols = st.columns([1, 3])
-            with cols[0]:
-                st.markdown(f"**AI 分类:** {tag_badge(row.get('ai_tag', '其他'))}", unsafe_allow_html=True)
-                st.markdown(f"**信号判断:** {signal_badge(row.get('ai_signal', '中性'))}", unsafe_allow_html=True)
-                if row.get("url"):
-                    st.link_button("查看原文 🔗", row["url"], width="stretch")
-                if row.get("pdf_url"):
-                    st.link_button("下载 PDF 📄", row["pdf_url"], width="stretch")
+# --- 逐条详情（可展开） ---
+st.subheader("🔍 公告详情与 AI 分析")
+for idx, row in filtered_df.head(20).iterrows():
+    with st.expander(f"[{row['announce_date']}] {row['title']}"):
+        cols = st.columns([1, 3])
+        with cols[0]:
+            st.markdown(f"**AI 分类:** {tag_badge(row.get('ai_tag', '其他'))}", unsafe_allow_html=True)
+            st.markdown(f"**信号判断:** {signal_badge(row.get('ai_signal', '中性'))}", unsafe_allow_html=True)
+            if row.get("url"):
+                st.link_button("查看原文 🔗", row["url"], width="stretch")
+            if row.get("pdf_url"):
+                st.link_button("下载 PDF 📄", row["pdf_url"], width="stretch")
 
-                # 生成结构化深度分析并提供单条下载
-                safe_title = re.sub(r'[\\/:*?"<>|]', "_", row['title'])[:40]
-                report_filename = f"{row['announce_date']}_{stock_code}_{safe_title}_AI深度分析.docx"
-                report_docx = generate_report_docx(stock_code, name, row)
-                st.download_button(
-                    label="📝 下载深度分析报告",
-                    data=report_docx,
-                    file_name=report_filename,
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    key=f"dl_{stock_code}_{row.get('art_code', idx)}",
-                    width="stretch",
-                )
+            # 生成结构化深度分析并提供单条下载
+            safe_title = re.sub(r'[\\/:*?"<>|]', "_", row['title'])[:40]
+            report_filename = f"{row['announce_date']}_{stock_code}_{safe_title}_AI深度分析.docx"
+            report_docx = generate_report_docx(stock_code, name, row)
+            st.download_button(
+                label="📝 下载深度分析报告",
+                data=report_docx,
+                file_name=report_filename,
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                key=f"dl_{stock_code}_{row.get('art_code', idx)}",
+                width="stretch",
+            )
 
-            with cols[1]:
-                summary = get_structured_summary(row, stock_name=name)
-                st.markdown("**📋 结构化摘要**")
-                st.info(summary)
+        with cols[1]:
+            summary = get_structured_summary(row, stock_name=name)
+            st.markdown("**📋 结构化摘要**")
+            st.info(summary)
 
-                reason = get_reason(row)
-                st.markdown("**判断理由**")
-                st.success(reason)
+            reason = get_reason(row)
+            st.markdown("**判断理由**")
+            st.success(reason)
 
-    st.caption("提示：结构化摘要和判断理由优先展示本地数据库中的 Kimi AI 分析结果；若无，则尝试调用 LLM API（需配置 MOONSHOT_API_KEY 或 OPENAI_API_KEY）；否则使用规则模板生成。")
+st.caption("提示：结构化摘要和判断理由优先展示本地数据库中的 Kimi AI 分析结果；若无，则尝试调用 LLM API（需配置 MOONSHOT_API_KEY 或 OPENAI_API_KEY）；否则使用规则模板生成。")
