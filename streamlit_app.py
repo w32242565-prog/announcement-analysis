@@ -280,9 +280,10 @@ def fetch_kline_from_baostock(stock_code: str, years: int = 8) -> pd.DataFrame:
 
 
 def plot_kline(df_kline: pd.DataFrame, stock_name: str = "", days: int | None = None,
-                flags: list[dict] | None = None, show_ma: bool = True,
-                show_boll: bool = False, show_flags: bool = True) -> go.Figure:
-    """使用 plotly 绘制 K 线图（含成交量），支持按天数缩放到最近范围，并标注旗形、均线、布林带"""
+                flags: list[dict] | None = None, triangles: list[dict] | None = None,
+                show_ma: bool = True, show_boll: bool = False,
+                show_flags: bool = True) -> go.Figure:
+    """使用 plotly 绘制 K 线图（含成交量），支持按天数缩放到最近范围，并标注旗形、三角形、均线、布林带"""
     if df_kline.empty:
         return go.Figure()
 
@@ -411,6 +412,67 @@ def plot_kline(df_kline: pd.DataFrame, stock_name: str = "", days: int | None = 
             fig.add_annotation(
                 x=x_mid, y=label_y,
                 text=f"<b>{flag['type']}</b>",
+                showarrow=False,
+                font=dict(color=line_color, size=12),
+                row=1, col=1,
+            )
+
+    # 标注三角形收敛形态
+    if show_flags and triangles:
+        for tri in triangles:
+            tri_type = tri["type"]
+            if tri_type == "对称三角形":
+                line_color = "#7B1FA2"  # 紫色
+                fill_color = "rgba(123,31,162,0.10)"
+            elif tri_type == "上升三角形":
+                line_color = "#d32f2f"  # 红色
+                fill_color = "rgba(211,47,47,0.10)"
+            else:  # 下降三角形
+                line_color = "#388e3c"  # 绿色
+                fill_color = "rgba(56,142,60,0.10)"
+
+            ts = tri["start"]
+            te = tri["end"] - 1
+
+            x_ts = x_vals[ts]
+            x_te = x_vals[te]
+            x_mid = x_vals[(ts + te) // 2]
+
+            # 三角形区域填充
+            fig.add_shape(
+                type="rect",
+                x0=x_ts, x1=x_te,
+                y0=min(tri["low_start"], tri["low_end"]),
+                y1=max(tri["high_start"], tri["high_end"]),
+                fillcolor=fill_color,
+                line=dict(width=0),
+                layer="below",
+                row=1, col=1,
+            )
+
+            # 上轨
+            fig.add_shape(
+                type="line",
+                x0=x_ts, y0=tri["high_start"],
+                x1=x_te, y1=tri["high_end"],
+                line=dict(color=line_color, width=2, dash="dash"),
+                row=1, col=1,
+            )
+
+            # 下轨
+            fig.add_shape(
+                type="line",
+                x0=x_ts, y0=tri["low_start"],
+                x1=x_te, y1=tri["low_end"],
+                line=dict(color=line_color, width=2, dash="dash"),
+                row=1, col=1,
+            )
+
+            # 标注文字
+            label_y = max(tri["high_start"], tri["high_end"]) * 1.01
+            fig.add_annotation(
+                x=x_mid, y=label_y,
+                text=f"<b>{tri_type}</b>",
                 showarrow=False,
                 font=dict(color=line_color, size=12),
                 row=1, col=1,
@@ -549,6 +611,46 @@ def analyze_kline_tech(df_kline: pd.DataFrame) -> dict:
 
 
 # ============================
+# 2.5 公共工具函数
+# ============================
+def _linear_slope(y_vals):
+    """计算线性回归斜率"""
+    x = np.arange(len(y_vals))
+    if len(x) < 2:
+        return 0.0
+    return np.polyfit(x, y_vals, 1)[0]
+
+
+def _body_crosses_channel(start, end, up_start, up_end, low_start, low_end, opens, closes):
+    """
+    检查期间 K 线实体是否穿越通道边界超过 5%。
+    上轨 = 首高点 → 尾高点连线，下轨 = 首低点 → 尾低点连线。
+    返回 True 表示有穿越超过 5%，该形态不成立。
+    """
+    dur = end - 1 - start
+    if dur <= 0:
+        return True
+    for j in range(start, end):
+        ratio = (j - start) / dur
+        upper = up_start + (up_end - up_start) * ratio
+        lower = low_start + (low_end - low_start) * ratio
+        o = opens[j]
+        c = closes[j]
+        body_top = max(o, c)
+        body_bottom = min(o, c)
+        body_len = body_top - body_bottom
+        if body_len <= 0:
+            continue
+        # 上穿：实体上沿超出上轨且超出部分 > 实体长度 5%
+        if body_top > upper and (body_top - upper) > body_len * 0.05:
+            return True
+        # 下穿：实体下沿低于下轨且超出部分 > 实体长度 5%
+        if body_bottom < lower and (lower - body_bottom) > body_len * 0.05:
+            return True
+    return False
+
+
+# ============================
 # 2.5 旗形检测
 # ============================
 def detect_flag_patterns(df_kline: pd.DataFrame) -> list[dict]:
@@ -569,41 +671,6 @@ def detect_flag_patterns(df_kline: pd.DataFrame) -> list[dict]:
     n = len(df)
 
     flags = []
-
-    def linear_slope(y_vals):
-        """计算线性回归斜率"""
-        x = np.arange(len(y_vals))
-        if len(x) < 2:
-            return 0.0
-        return np.polyfit(x, y_vals, 1)[0]
-
-    def body_crosses_channel(flag_start, flag_end, up_start, up_end, low_start, low_end, opens, closes):
-        """
-        检查旗面期间 K 线实体是否穿越通道边界超过 5%。
-        上轨 = 首高点 → 尾高点连线，下轨 = 首低点 → 尾低点连线。
-        返回 True 表示有穿越超过 5%，该旗形不成立。
-        """
-        dur = flag_end - 1 - flag_start
-        if dur <= 0:
-            return True
-        for j in range(flag_start, flag_end):
-            ratio = (j - flag_start) / dur
-            upper = up_start + (up_end - up_start) * ratio
-            lower = low_start + (low_end - low_start) * ratio
-            o = opens[j]
-            c = closes[j]
-            body_top = max(o, c)
-            body_bottom = min(o, c)
-            body_len = body_top - body_bottom
-            if body_len <= 0:
-                continue
-            # 上穿：实体上沿超出上轨且超出部分 > 实体长度 5%
-            if body_top > upper and (body_top - upper) > body_len * 0.05:
-                return True
-            # 下穿：实体下沿低于下轨且超出部分 > 实体长度 5%
-            if body_bottom < lower and (lower - body_bottom) > body_len * 0.05:
-                return True
-        return False
 
     # 旗杆 5~15 个交易日，旗面 5~20 个交易日
     pole_min_days, pole_max_days = 5, 15
@@ -640,8 +707,8 @@ def detect_flag_patterns(df_kline: pd.DataFrame) -> list[dict]:
             if len(flag_highs) < flag_min_days:
                 continue
 
-            high_slope = linear_slope(flag_highs)
-            low_slope = linear_slope(flag_lows)
+            high_slope = _linear_slope(flag_highs)
+            low_slope = _linear_slope(flag_lows)
 
             # --- 上飘旗 ---
             if is_bull_pole:
@@ -672,7 +739,7 @@ def detect_flag_patterns(df_kline: pd.DataFrame) -> list[dict]:
                     continue
 
                 # ===== K线实体是否穿越旗面通道超过 5% =====
-                if body_crosses_channel(flag_start, flag_end, highs[flag_start], highs[flag_end - 1],
+                if _body_crosses_channel(flag_start, flag_end, highs[flag_start], highs[flag_end - 1],
                                         lows[flag_start], lows[flag_end - 1], df["open"].values, closes):
                     continue
 
@@ -681,8 +748,8 @@ def detect_flag_patterns(df_kline: pd.DataFrame) -> list[dict]:
                     ext_highs = highs[flag_start:flag_end + 1]
                     ext_lows = lows[flag_start:flag_end + 1]
                     if len(ext_highs) >= 2:
-                        ext_hsl = linear_slope(ext_highs)
-                        ext_lsl = linear_slope(ext_lows)
+                        ext_hsl = _linear_slope(ext_highs)
+                        ext_lsl = _linear_slope(ext_lows)
                         can_extend = ext_hsl < 0 and ext_lsl < 0
                         if can_extend:
                             if flag_end - flag_start < flag_max_days:
@@ -746,7 +813,7 @@ def detect_flag_patterns(df_kline: pd.DataFrame) -> list[dict]:
                     continue
 
                 # ===== K线实体是否穿越旗面通道超过 5% =====
-                if body_crosses_channel(flag_start, flag_end, highs[flag_start], highs[flag_end - 1],
+                if _body_crosses_channel(flag_start, flag_end, highs[flag_start], highs[flag_end - 1],
                                         lows[flag_start], lows[flag_end - 1], df["open"].values, closes):
                     continue
 
@@ -755,8 +822,8 @@ def detect_flag_patterns(df_kline: pd.DataFrame) -> list[dict]:
                     ext_highs = highs[flag_start:flag_end + 1]
                     ext_lows = lows[flag_start:flag_end + 1]
                     if len(ext_highs) >= 2:
-                        ext_hsl = linear_slope(ext_highs)
-                        ext_lsl = linear_slope(ext_lows)
+                        ext_hsl = _linear_slope(ext_highs)
+                        ext_lsl = _linear_slope(ext_lows)
                         can_extend = ext_hsl > 0 and ext_lsl > 0
                         if can_extend:
                             if flag_end - flag_start < flag_max_days:
@@ -798,6 +865,114 @@ def detect_flag_patterns(df_kline: pd.DataFrame) -> list[dict]:
             i += 1
 
     return flags
+
+
+# ============================
+# 2.5b 三角形收敛检测
+# ============================
+def detect_triangle_patterns(df_kline: pd.DataFrame) -> list[dict]:
+    """
+    检测三角形收敛形态：对称三角形、上升三角形、下降三角形。
+    持续时间严格 15~60 个交易日。
+    画法：上轨 = 首高点→尾高点连线，下轨 = 首低点→尾低点连线（与旗面一致）。
+    """
+    if len(df_kline) < 60:
+        return []
+
+    df = df_kline.copy().reset_index(drop=True)
+    highs = df["high"].values
+    lows = df["low"].values
+    closes = df["close"].values
+    opens = df["open"].values
+    volumes = df["volume"].values
+    dates = df["date"].values
+    n = len(df)
+
+    triangles = []
+    min_days, max_days = 15, 60
+
+    # 从后往前尝试不同长度，优先检测最近、最典型的形态
+    for length in range(max_days, min_days - 1, -1):
+        if length > n:
+            continue
+
+        start = n - length
+        end = n
+
+        wh = highs[start:end]
+        wl = lows[start:end]
+        wc = closes[start:end]
+        wv = volumes[start:end]
+
+        avg_price = wc.mean()
+        if avg_price <= 0:
+            continue
+
+        high_slope = _linear_slope(wh)
+        low_slope = _linear_slope(wl)
+
+        # 相对斜率（归一化到价格）
+        hsp = high_slope / avg_price
+        lsp = low_slope / avg_price
+
+        high_start, high_end = wh[0], wh[-1]
+        low_start, low_end = wl[0], wl[-1]
+
+        # 振幅检查：整理期间振幅不能过大
+        price_range = wh.max() - wl.min()
+        if price_range / avg_price > 0.30:
+            continue
+
+        triangle_type = None
+
+        # 对称三角形：上轨下降，下轨上升，向中间收敛
+        if hsp < -0.0008 and lsp > 0.0008:
+            if high_end < high_start and low_end > low_start:
+                # 收敛度检查：两端开口应明显收窄
+                top_open = high_start - low_start
+                bottom_open = high_end - low_end
+                if top_open > 0 and bottom_open > 0 and bottom_open < top_open * 0.7:
+                    triangle_type = "对称三角形"
+
+        # 上升三角形：上轨水平（阻力），下轨向上倾斜（支撑抬高）
+        elif abs(hsp) < 0.0005 and lsp > 0.0008:
+            if low_end > low_start:
+                triangle_type = "上升三角形"
+
+        # 下降三角形：上轨向下倾斜（压力降低），下轨水平（支撑）
+        elif hsp < -0.0008 and abs(lsp) < 0.0005:
+            if high_end < high_start:
+                triangle_type = "下降三角形"
+
+        if not triangle_type:
+            continue
+
+        # K线实体穿越检查（与旗形一致）
+        if _body_crosses_channel(start, end, high_start, high_end, low_start, low_end, opens, closes):
+            continue
+
+        # 成交量检查：三角形期间应逐渐萎缩（后半段 <= 前半段的1.1倍）
+        half = len(wv) // 2
+        if half > 0:
+            vol_first = wv[:half].mean()
+            vol_second = wv[half:].mean()
+            if vol_first > 0 and vol_second > vol_first * 1.1:
+                continue
+
+        triangles.append({
+            "type": triangle_type,
+            "start": start,
+            "end": end,
+            "high_start": float(high_start),
+            "high_end": float(high_end),
+            "low_start": float(low_start),
+            "low_end": float(low_end),
+            "date_start": dates[start],
+            "date_end": dates[end - 1],
+        })
+        break  # 只取最近的一个最典型形态
+
+    return triangles
 
 
 # ============================
@@ -1373,14 +1548,16 @@ if search_clicked or True:
                     st.session_state[state_key] = not is_on
                     st.rerun()
 
-        # 旗形检测（仅在开启时计算）
+        # 形态检测（仅在开启时计算）
         flags = detect_flag_patterns(df_kline) if st.session_state.show_flags else []
+        triangles = detect_triangle_patterns(df_kline) if st.session_state.show_flags else []
 
         fig_kline = plot_kline(
             df_kline,
             stock_name=name or stock_code,
             days=st.session_state.kline_days,
             flags=flags,
+            triangles=triangles,
             show_ma=st.session_state.show_ma,
             show_boll=st.session_state.show_boll,
             show_flags=st.session_state.show_flags,
@@ -1388,27 +1565,57 @@ if search_clicked or True:
         st.plotly_chart(fig_kline, use_container_width=True)
 
         # 旗形检测结果展示（仅在开启时显示）
-        if st.session_state.show_flags and flags:
+        if st.session_state.show_flags:
             st.markdown("<span style='font-size:13px'>**🚩 旗形形态检测**</span>", unsafe_allow_html=True)
-            for f in flags:
-                d_ps = pd.to_datetime(f["date_pole_start"]).strftime("%Y-%m-%d")
-                d_pe = pd.to_datetime(f["date_pole_end"]).strftime("%Y-%m-%d")
-                d_fs = pd.to_datetime(f["date_flag_start"]).strftime("%Y-%m-%d")
-                d_fe = pd.to_datetime(f["date_flag_end"]).strftime("%Y-%m-%d")
-                if f["type"] == "上飘旗":
-                    st.success(
-                        f"检测到 **上飘旗**（看涨信号）："
-                        f"旗杆期 {d_ps} → {d_pe} 急速拉升，"
-                        f"随后 {d_fs} → {d_fe} 缩量向下整理，"
-                        f"关注放量突破旗面上轨后的跟进机会。"
-                    )
-                else:
-                    st.error(
-                        f"检测到 **下飘旗**（看跌信号）："
-                        f"旗杆期 {d_ps} → {d_pe} 急速杀跌，"
-                        f"随后 {d_fs} → {d_fe} 缩量向上整理，"
-                        f"警惕放量跌破旗面下轨后的持续下跌风险。"
-                    )
+            if flags:
+                for f in flags:
+                    d_ps = pd.to_datetime(f["date_pole_start"]).strftime("%Y-%m-%d")
+                    d_pe = pd.to_datetime(f["date_pole_end"]).strftime("%Y-%m-%d")
+                    d_fs = pd.to_datetime(f["date_flag_start"]).strftime("%Y-%m-%d")
+                    d_fe = pd.to_datetime(f["date_flag_end"]).strftime("%Y-%m-%d")
+                    if f["type"] == "上飘旗":
+                        st.success(
+                            f"检测到 **上飘旗**（看涨信号）："
+                            f"旗杆期 {d_ps} → {d_pe} 急速拉升，"
+                            f"随后 {d_fs} → {d_fe} 缩量向下整理，"
+                            f"关注放量突破旗面上轨后的跟进机会。"
+                        )
+                    else:
+                        st.error(
+                            f"检测到 **下飘旗**（看跌信号）："
+                            f"旗杆期 {d_ps} → {d_pe} 急速杀跌，"
+                            f"随后 {d_fs} → {d_fe} 缩量向上整理，"
+                            f"警惕放量跌破旗面下轨后的持续下跌风险。"
+                        )
+            else:
+                st.info("没有检测到旗形形态。")
+
+            # 三角形收敛形态检测展示
+            st.markdown("<span style='font-size:13px'>**🔺 三角形收敛形态检测**</span>", unsafe_allow_html=True)
+            if triangles:
+                for tri in triangles:
+                    d_s = pd.to_datetime(tri["date_start"]).strftime("%Y-%m-%d")
+                    d_e = pd.to_datetime(tri["date_end"]).strftime("%Y-%m-%d")
+                    if tri["type"] == "对称三角形":
+                        st.info(
+                            f"检测到 **对称三角形**（中性）："
+                            f"{d_s} → {d_e} 期间高点不断降低、低点不断抬高，多空力量趋于均衡；"
+                            f"突破上轨 → 看涨，跌破下轨 → 看跌，突破时需放量确认。"
+                        )
+                    elif tri["type"] == "上升三角形":
+                        st.success(
+                            f"检测到 **上升三角形**（看涨偏多）："
+                            f"{d_s} → {d_e} 期间上轨水平、下轨抬高，买方力量渐强；"
+                            f"放量突破水平阻力线 → 强烈看涨信号。"
+                        )
+                    else:  # 下降三角形
+                        st.error(
+                            f"检测到 **下降三角形**（看跌偏多）："
+                            f"{d_s} → {d_e} 期间上轨下倾、下轨水平，卖方力量渐强；"
+                            f"放量跌破水平支撑线 → 强烈看跌信号。"
+                        )
+            else:
+                st.info("没有检测到三角形收敛形态。")
 
         # 技术面分析
         tech = analyze_kline_tech(df_kline)
