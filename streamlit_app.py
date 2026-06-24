@@ -528,7 +528,7 @@ def plot_kline(df_kline: pd.DataFrame, stock_name: str = "", days: int | None = 
         height=600,
         xaxis_rangeslider_visible=False,
         hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        legend=dict(orientation="h", yanchor="bottom", y=0.02, xanchor="right", x=0.99),
         margin=dict(l=40, r=40, t=60, b=40),
         template="plotly_white",
     )
@@ -1744,9 +1744,22 @@ if search_clicked or True:
         if "show_triangles" not in st.session_state:
             st.session_state.show_triangles = False
 
+        # 注入 CSS：按钮贴住 + 文字横排不换行
+        st.markdown("""
+        <style>
+        div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+            padding-left: 2px !important;
+            padding-right: 2px !important;
+        }
+        button[kind="primary"] p, button[kind="secondary"] p {
+            white-space: nowrap !important;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+
         # 第一排：时间范围按钮
         st.markdown("<span style='font-size:12px;color:#666'>时间范围</span>", unsafe_allow_html=True)
-        btn_cols = st.columns([0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 10])
+        btn_cols = st.columns([1, 1, 1, 1, 1, 1, 1, 1, 10])
         ranges = [
             (btn_cols[0], "5日", 5),
             (btn_cols[1], "10日", 10),
@@ -1760,13 +1773,13 @@ if search_clicked or True:
         for col, label, days in ranges:
             with col:
                 is_active = st.session_state.kline_days == days
-                if st.button(label, key=f"kline_{stock_code}_{days}", type="primary" if is_active else "secondary"):
+                if st.button(label, key=f"kline_{stock_code}_{days}", type="primary" if is_active else "secondary", use_container_width=True):
                     st.session_state.kline_days = days
                     st.rerun()
 
         # 第二排：显示图层按钮（均线、布林带）
         st.markdown("<span style='font-size:12px;color:#666'>显示图层</span>", unsafe_allow_html=True)
-        ctrl_cols = st.columns([1.2, 1.2, 10])
+        ctrl_cols = st.columns([1, 1, 10])
         ctrl_items = [
             (ctrl_cols[0], "均线", "show_ma"),
             (ctrl_cols[1], "布林带", "show_boll"),
@@ -1774,13 +1787,13 @@ if search_clicked or True:
         for col, label, state_key in ctrl_items:
             with col:
                 is_on = st.session_state[state_key]
-                if st.button(label, key=f"ctrl_{stock_code}_{state_key}", type="primary" if is_on else "secondary"):
+                if st.button(label, key=f"ctrl_{stock_code}_{state_key}", type="primary" if is_on else "secondary", use_container_width=True):
                     st.session_state[state_key] = not is_on
                     st.rerun()
 
         # 第三排：形态检测按钮（旗形、三角形收敛）
         st.markdown("<span style='font-size:12px;color:#666'>形态检测</span>", unsafe_allow_html=True)
-        pattern_cols = st.columns([1.2, 1.2, 10])
+        pattern_cols = st.columns([1, 1, 10])
         pattern_items = [
             (pattern_cols[0], "旗形", "show_flags"),
             (pattern_cols[1], "三角形收敛", "show_triangles"),
@@ -1788,7 +1801,7 @@ if search_clicked or True:
         for col, label, state_key in pattern_items:
             with col:
                 is_on = st.session_state[state_key]
-                if st.button(label, key=f"ctrl_{stock_code}_{state_key}", type="primary" if is_on else "secondary"):
+                if st.button(label, key=f"ctrl_{stock_code}_{state_key}", type="primary" if is_on else "secondary", use_container_width=True):
                     st.session_state[state_key] = not is_on
                     st.rerun()
 
@@ -2031,7 +2044,7 @@ if search_clicked or True:
                 xaxis_title="报告期",
                 yaxis_title="金额（亿元）",
                 hovermode="x unified",
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                legend=dict(orientation="h", yanchor="bottom", y=0.02, xanchor="right", x=0.99),
                 margin=dict(l=40, r=40, t=60, b=40),
                 template="plotly_white",
             )
