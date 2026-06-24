@@ -1299,6 +1299,171 @@ def get_financial_indicators(stock_code: str) -> pd.DataFrame:
 
 
 # ============================
+# 2.7 从 akshare / 本地 CSV 获取财务三表
+# ============================
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_financial_statements(stock_code: str) -> dict:
+    """
+    获取财务三表数据。优先尝试 akshare 实时获取，失败则回退到本地 CSV。
+    返回 {"balance": DataFrame, "profit": DataFrame, "cashflow": DataFrame}
+    """
+    result = {"balance": pd.DataFrame(), "profit": pd.DataFrame(), "cashflow": pd.DataFrame()}
+
+    # 尝试 akshare 实时获取
+    try:
+        import akshare as ak
+
+        # 新浪接口（东方财富 report_em 接口在某些 akshare 版本有 bug）
+        bs = ak.stock_financial_report_sina(stock="sz" + stock_code if stock_code.startswith("00") or stock_code.startswith("30") else "sh" + stock_code, symbol="资产负债表")
+        pl = ak.stock_financial_report_sina(stock="sz" + stock_code if stock_code.startswith("00") or stock_code.startswith("30") else "sh" + stock_code, symbol="利润表")
+        cf = ak.stock_financial_report_sina(stock="sz" + stock_code if stock_code.startswith("00") or stock_code.startswith("30") else "sh" + stock_code, symbol="现金流量表")
+
+        if not bs.empty:
+            result["balance"] = bs
+        if not pl.empty:
+            result["profit"] = pl
+        if not cf.empty:
+            result["cashflow"] = cf
+
+        # 如果至少获取到一个表，就认为成功
+        if not all(df.empty for df in result.values()):
+            return result
+    except Exception:
+        pass
+
+    # 回退：从本地 CSV 读取
+    mapping = {
+        "balance": ("04_原始数据备份/05_资产负债表.csv", "报告日"),
+        "profit": ("04_原始数据备份/06_利润表.csv", "报告日"),
+        "cashflow": ("04_原始数据备份/07_现金流量表.csv", "报告日"),
+    }
+    for key, (csv_path, date_col) in mapping.items():
+        if os.path.exists(csv_path):
+            try:
+                df = pd.read_csv(csv_path, encoding="utf-8-sig")
+                if not df.empty:
+                    result[key] = df
+            except Exception:
+                pass
+
+    return result
+
+
+def _fmt_fin_value(val):
+    """格式化财务数值：大数字转亿元，保留2位小数"""
+    if pd.isna(val):
+        return "—"
+    try:
+        v = float(val)
+        if abs(v) >= 1e8:
+            return f"{v/1e8:,.2f} 亿"
+        elif abs(v) >= 1e4:
+            return f"{v/1e4:,.2f} 万"
+        else:
+            return f"{v:,.2f}"
+    except (ValueError, TypeError):
+        return str(val)
+
+
+def extract_key_financials(balance_df: pd.DataFrame, profit_df: pd.DataFrame, cashflow_df: pd.DataFrame) -> dict:
+    """从三表原始数据中提取关键指标，生成便于展示的 DataFrame"""
+    output = {}
+
+    # --- 资产负债表关键指标 ---
+    if not balance_df.empty:
+        date_col = next((c for c in balance_df.columns if "报告" in str(c) or "日期" in str(c)), balance_df.columns[0])
+        key_items = {
+            "货币资金": ["货币资金"],
+            "应收账款": ["应收账款", "应收票据及应收账款"],
+            "存货": ["存货"],
+            "流动资产合计": ["流动资产合计"],
+            "固定资产": ["固定资产净额", "固定资产净值", "固定资产"],
+            "非流动资产合计": ["非流动资产合计"],
+            "资产总计": ["资产总计"],
+            "短期借款": ["短期借款"],
+            "应付账款": ["应付账款", "应付票据及应付账款"],
+            "流动负债合计": ["流动负债合计"],
+            "非流动负债合计": ["非流动负债合计"],
+            "负债合计": ["负债合计"],
+            "所有者权益合计": ["所有者权益(或股东权益)合计", "所有者权益合计", "归属于母公司股东权益合计"],
+        }
+        rows = []
+        for label, candidates in key_items.items():
+            for cand in candidates:
+                if cand in balance_df.columns:
+                    row = {"指标": label}
+                    for _, r in balance_df.iterrows():
+                        period = str(r[date_col])[:10]
+                        row[period] = _fmt_fin_value(r[cand])
+                    rows.append(row)
+                    break
+        if rows:
+            output["balance"] = pd.DataFrame(rows)
+
+    # --- 利润表关键指标 ---
+    if not profit_df.empty:
+        date_col = next((c for c in profit_df.columns if "报告" in str(c) or "日期" in str(c)), profit_df.columns[0])
+        key_items = {
+            "营业总收入": ["营业总收入"],
+            "营业成本": ["营业成本"],
+            "营业税金及附加": ["营业税金及附加"],
+            "销售费用": ["销售费用"],
+            "管理费用": ["管理费用"],
+            "研发费用": ["研发费用"],
+            "财务费用": ["财务费用"],
+            "营业利润": ["营业利润"],
+            "利润总额": ["利润总额"],
+            "所得税费用": ["所得税费用"],
+            "净利润": ["净利润"],
+            "归母净利润": ["归属于母公司所有者的净利润"],
+            "基本每股收益": ["基本每股收益"],
+        }
+        rows = []
+        for label, candidates in key_items.items():
+            for cand in candidates:
+                if cand in profit_df.columns:
+                    row = {"指标": label}
+                    for _, r in profit_df.iterrows():
+                        period = str(r[date_col])[:10]
+                        row[period] = _fmt_fin_value(r[cand])
+                    rows.append(row)
+                    break
+        if rows:
+            output["profit"] = pd.DataFrame(rows)
+
+    # --- 现金流量表关键指标 ---
+    if not cashflow_df.empty:
+        date_col = next((c for c in cashflow_df.columns if "报告" in str(c) or "日期" in str(c)), cashflow_df.columns[0])
+        key_items = {
+            "销售商品收到的现金": ["销售商品、提供劳务收到的现金"],
+            "经营活动现金流入": ["经营活动现金流入小计"],
+            "经营活动现金流出": ["经营活动现金流出小计"],
+            "经营活动现金流净额": ["经营活动产生的现金流量净额"],
+            "投资活动现金流入": ["投资活动现金流入小计"],
+            "投资活动现金流出": ["投资活动现金流出小计"],
+            "投资活动现金流净额": ["投资活动产生的现金流量净额"],
+            "筹资活动现金流入": ["筹资活动现金流入小计"],
+            "筹资活动现金流出": ["筹资活动现金流出小计"],
+            "筹资活动现金流净额": ["筹资活动产生的现金流量净额"],
+            "现金净增加额": ["现金及现金等价物净增加额"],
+        }
+        rows = []
+        for label, candidates in key_items.items():
+            for cand in candidates:
+                if cand in cashflow_df.columns:
+                    row = {"指标": label}
+                    for _, r in cashflow_df.iterrows():
+                        period = str(r[date_col])[:10]
+                        row[period] = _fmt_fin_value(r[cand])
+                    rows.append(row)
+                    break
+        if rows:
+            output["cashflow"] = pd.DataFrame(rows)
+
+    return output
+
+
+# ============================
 # 3. 结构化深度分析生成
 # ============================
 def call_llm_analyze(title: str, tag: str = "", signal: str = "") -> str | None:
@@ -2140,6 +2305,36 @@ if not df_fin_indicators.empty:
         st.info("财务指标数据格式不匹配，无法绘制趋势图。")
 else:
     st.info("未找到主要财务指标数据（08_主要财务指标.csv）。")
+
+# --- 财务数据明细（akshare / 本地 CSV） ---
+st.subheader("📊 财务数据明细")
+with st.spinner("正在加载财务三表数据..."):
+    fin_statements = fetch_financial_statements(stock_code)
+    key_fin = extract_key_financials(
+        fin_statements["balance"],
+        fin_statements["profit"],
+        fin_statements["cashflow"],
+    )
+
+if key_fin:
+    fin_tabs = st.tabs(["资产负债表", "利润表", "现金流量表"])
+    with fin_tabs[0]:
+        if "balance" in key_fin and not key_fin["balance"].empty:
+            st.dataframe(key_fin["balance"], use_container_width=True, hide_index=True)
+        else:
+            st.info("未获取到资产负债表数据。")
+    with fin_tabs[1]:
+        if "profit" in key_fin and not key_fin["profit"].empty:
+            st.dataframe(key_fin["profit"], use_container_width=True, hide_index=True)
+        else:
+            st.info("未获取到利润表数据。")
+    with fin_tabs[2]:
+        if "cashflow" in key_fin and not key_fin["cashflow"].empty:
+            st.dataframe(key_fin["cashflow"], use_container_width=True, hide_index=True)
+        else:
+            st.info("未获取到现金流量表数据。")
+else:
+    st.info("未获取到财务三表数据（akshare 接口暂时不可用，且本地 CSV 未找到）。")
 
 st.divider()
 
