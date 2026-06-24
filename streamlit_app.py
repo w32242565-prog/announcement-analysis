@@ -1538,9 +1538,9 @@ def compute_financial_ratios(balance_df: pd.DataFrame, profit_df: pd.DataFrame, 
         if revenue and net_profit and revenue != 0:
             m["净利率"] = {"value": net_profit / revenue * 100, "unit": "%", "note": "最终赚钱能力，扣除所有费用后的真实利润"}
         if net_profit and equity and equity != 0:
-            m["ROE"] = {"value": net_profit / equity * 100, "unit": "%", "note": "巴菲特最看重的指标，衡量股东投入资本的回报效率"}
+            m["ROE（净资产收益率）"] = {"value": net_profit / equity * 100, "unit": "%", "note": "巴菲特最看重的指标，衡量股东投入资本的回报效率"}
         if net_profit and total_assets and total_assets != 0:
-            m["ROA"] = {"value": net_profit / total_assets * 100, "unit": "%", "note": "资产利用效率"}
+            m["ROA（总资产收益率）"] = {"value": net_profit / total_assets * 100, "unit": "%", "note": "资产利用效率"}
 
         # === 偿债能力 ===
         if total_liab and total_assets and total_assets != 0:
@@ -1560,13 +1560,13 @@ def compute_financial_ratios(balance_df: pd.DataFrame, profit_df: pd.DataFrame, 
 
         # === 现金流 ===
         if op_cash is not None:
-            m["经营现金流净额"] = {"value": op_cash / 1e8, "unit": "亿", "note": "主业实际收到的现金，必须为正"}
+            m["经营现金流净额（经营现金流量净额）"] = {"value": op_cash / 1e8, "unit": "亿", "note": "主业实际收到的现金，必须为正"}
         if op_cash is not None and capex is not None:
-            m["自由现金流"] = {"value": (op_cash - capex) / 1e8, "unit": "亿", "note": "可分配给股东的真金白银"}
+            m["自由现金流（经营现金流-资本支出）"] = {"value": (op_cash - capex) / 1e8, "unit": "亿", "note": "可分配给股东的真金白银"}
         if op_cash is not None and net_profit and net_profit != 0:
             ratio = op_cash / net_profit
             safe = "✅ 利润有现金支撑" if ratio > 1 else "⚠️ 利润可能是纸面富贵"
-            m["现金流/净利润"] = {"value": ratio, "unit": "", "note": f">1 说明利润有现金支撑，{safe}"}
+            m["现金流/净利润（经营现金流÷净利润）"] = {"value": ratio, "unit": "", "note": f">1 说明利润有现金支撑，{safe}"}
 
         results.append({"period": period, "metrics": m})
 
@@ -2361,10 +2361,10 @@ if fin_ratios:
 
     # 指标分类
     category_map = {
-        "盈利能力": ["毛利率", "净利率", "ROE", "ROA"],
+        "盈利能力": ["毛利率", "净利率", "ROE（净资产收益率）", "ROA（总资产收益率）"],
         "成长性": ["营收增长率", "净利润增长率", "扣非净利润增长率"],
         "偿债能力": ["资产负债率", "流动比率", "速动比率", "有息负债率"],
-        "现金流": ["经营现金流净额", "自由现金流", "现金流/净利润"],
+        "现金流": ["经营现金流净额（经营现金流量净额）", "自由现金流（经营现金流-资本支出）", "现金流/净利润（经营现金流÷净利润）"],
     }
 
     # 准备最近一期的数据
@@ -2387,9 +2387,9 @@ if fin_ratios:
                     st.markdown(f"**{name}**")
                     st.caption("数据不可用")
         # 跨期分析备注
-        roe_vals = [r["metrics"]["ROE"]["value"] for r in fin_ratios if "ROE" in r["metrics"]]
+        roe_vals = [r["metrics"]["ROE（净资产收益率）"]["value"] for r in fin_ratios if "ROE（净资产收益率）" in r["metrics"]]
         if len(roe_vals) >= 5 and all(v > 15 for v in roe_vals[:5]):
-            st.success("ROE 连续5年 > 15% → 优秀公司")
+            st.success("ROE（净资产收益率）连续5年 > 15% → 优秀公司")
         gm_vals = [r["metrics"]["毛利率"]["value"] for r in fin_ratios if "毛利率" in r["metrics"]]
         if len(gm_vals) >= 2:
             trend = "稳定或提升" if gm_vals[0] >= gm_vals[1] * 0.98 else "下滑"
@@ -2400,7 +2400,7 @@ if fin_ratios:
         if "毛利率" in latest_metrics and "净利率" in latest_metrics:
             gap = latest_metrics["毛利率"]["value"] - latest_metrics["净利率"]["value"]
             if gap > 30:
-                st.warning(f"毛利率与净利率差距 {gap:.1f}% → 费用控制可能不合理")
+                st.warning(f"毛利率与净利率差距 {gap:.1f}% → 费用控制可能不合理（三项费用占比过高）")
             else:
                 st.info("毛利率与净利率差距合理 → 费用控制良好")
 
@@ -2459,7 +2459,7 @@ if fin_ratios:
                     st.markdown(f"**{name}**")
                     st.caption("数据不可用")
         # 现金流质量分析
-        op_vals = [r["metrics"]["经营现金流净额"]["value"] * 1e8 for r in fin_ratios if "经营现金流净额" in r["metrics"]]
+        op_vals = [r["metrics"]["经营现金流净额（经营现金流量净额）"]["value"] * 1e8 for r in fin_ratios if "经营现金流净额（经营现金流量净额）" in r["metrics"]]
         np_vals_raw = []
         for r in fin_ratios:
             # 需要原始净利润（非格式化后的）
