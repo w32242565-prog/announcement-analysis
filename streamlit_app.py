@@ -1470,6 +1470,149 @@ def extract_key_financials(balance_df: pd.DataFrame, profit_df: pd.DataFrame, ca
     return output
 
 
+def compute_financial_ratios(balance_df: pd.DataFrame, profit_df: pd.DataFrame, cashflow_df: pd.DataFrame) -> list[dict]:
+    """
+    从三表原始数据计算四大类财务分析指标。
+    返回按报告期排序的列表，每个元素为 {"period": str, "metrics": dict}。
+    """
+    if balance_df.empty or profit_df.empty:
+        return []
+
+    # 统一按报告期对齐（取三表都有的报告期）
+    bs_dates = set(str(v) for v in balance_df.iloc[:, 0].values)
+    pl_dates = set(str(v) for v in profit_df.iloc[:, 0].values)
+    cf_dates = set(str(v) for v in cashflow_df.iloc[:, 0].values) if not cashflow_df.empty else set()
+    common_dates = sorted(bs_dates & pl_dates, reverse=True)
+    if not common_dates:
+        return []
+
+    results = []
+
+    def _get_val(df, row_idx, candidates):
+        """从DataFrame的第row_idx行中，按候选列名依次查找数值"""
+        for cand in candidates:
+            if cand in df.columns:
+                v = df.iloc[row_idx][cand]
+                if pd.notna(v):
+                    try:
+                        return float(v)
+                    except (ValueError, TypeError):
+                        continue
+        return None
+
+    for period in common_dates[:8]:  # 最近8期
+        # 找到对应行索引
+        bs_idx = next((i for i, v in enumerate(balance_df.iloc[:, 0].values) if str(v) == period), None)
+        pl_idx = next((i for i, v in enumerate(profit_df.iloc[:, 0].values) if str(v) == period), None)
+        cf_idx = next((i for i, v in enumerate(cashflow_df.iloc[:, 0].values) if str(v) == period), None) if not cashflow_df.empty else None
+
+        if bs_idx is None or pl_idx is None:
+            continue
+
+        m = {}
+
+        # 原始值
+        revenue = _get_val(profit_df, pl_idx, ["营业总收入"])
+        cost = _get_val(profit_df, pl_idx, ["营业成本"])
+        net_profit = _get_val(profit_df, pl_idx, ["净利润"])
+        parent_profit = _get_val(profit_df, pl_idx, ["归属于母公司所有者的净利润"])
+        total_assets = _get_val(balance_df, bs_idx, ["资产总计"])
+        total_liab = _get_val(balance_df, bs_idx, ["负债合计"])
+        equity = _get_val(balance_df, bs_idx, ["所有者权益(或股东权益)合计", "所有者权益合计", "归属于母公司股东权益合计"])
+        current_assets = _get_val(balance_df, bs_idx, ["流动资产合计"])
+        current_liab = _get_val(balance_df, bs_idx, ["流动负债合计"])
+        inventory = _get_val(balance_df, bs_idx, ["存货"])
+        op_cash = _get_val(cashflow_df, cf_idx, ["经营活动产生的现金流量净额"]) if cf_idx is not None else None
+        capex = _get_val(cashflow_df, cf_idx, ["购建固定资产、无形资产和其他长期资产所支付的现金"]) if cf_idx is not None else None
+
+        # 有息负债相关
+        short_term = _get_val(balance_df, bs_idx, ["短期借款"]) or 0
+        long_term = _get_val(balance_df, bs_idx, ["长期借款"]) or 0
+        bonds = _get_val(balance_df, bs_idx, ["应付债券"]) or 0
+        non_current_due = _get_val(balance_df, bs_idx, ["一年内到期的非流动负债"]) or 0
+        interest_bearing = short_term + long_term + bonds + non_current_due
+
+        # === 盈利能力 ===
+        if revenue and cost and revenue != 0:
+            m["毛利率"] = {"value": (revenue - cost) / revenue * 100, "unit": "%", "note": "产品竞争力，越高越好（行业差异大）"}
+        if revenue and net_profit and revenue != 0:
+            m["净利率"] = {"value": net_profit / revenue * 100, "unit": "%", "note": "最终赚钱能力，扣除所有费用后的真实利润"}
+        if net_profit and equity and equity != 0:
+            m["ROE"] = {"value": net_profit / equity * 100, "unit": "%", "note": "巴菲特最看重的指标，衡量股东投入资本的回报效率"}
+        if net_profit and total_assets and total_assets != 0:
+            m["ROA"] = {"value": net_profit / total_assets * 100, "unit": "%", "note": "资产利用效率"}
+
+        # === 偿债能力 ===
+        if total_liab and total_assets and total_assets != 0:
+            safe = "✅ 安全" if total_liab / total_assets < 0.6 else "⚠️ 偏高"
+            m["资产负债率"] = {"value": total_liab / total_assets * 100, "unit": "%", "note": f"安全线 <60%，{safe}"}
+        if current_assets and current_liab and current_liab != 0:
+            cr = current_assets / current_liab
+            safe = "✅ 安全" if cr > 1.5 else ("⚠️ 偏低" if cr < 1 else "➖ 一般")
+            m["流动比率"] = {"value": cr, "unit": "", "note": f"安全线 >1.5~2，{safe}"}
+        if current_assets and inventory and current_liab and current_liab != 0:
+            qr = (current_assets - inventory) / current_liab
+            safe = "✅ 安全" if qr > 1 else "⚠️ 偏低"
+            m["速动比率"] = {"value": qr, "unit": "", "note": f"安全线 >1，{safe}"}
+        if total_assets and total_assets != 0:
+            safe = "✅ 安全" if interest_bearing / total_assets < 0.3 else "⚠️ 偏高"
+            m["有息负债率"] = {"value": interest_bearing / total_assets * 100, "unit": "%", "note": f"安全线 <30%，{safe}"}
+
+        # === 现金流 ===
+        if op_cash is not None:
+            m["经营现金流净额"] = {"value": op_cash / 1e8, "unit": "亿", "note": "主业实际收到的现金，必须为正"}
+        if op_cash is not None and capex is not None:
+            m["自由现金流"] = {"value": (op_cash - capex) / 1e8, "unit": "亿", "note": "可分配给股东的真金白银"}
+        if op_cash is not None and net_profit and net_profit != 0:
+            ratio = op_cash / net_profit
+            safe = "✅ 利润有现金支撑" if ratio > 1 else "⚠️ 利润可能是纸面富贵"
+            m["现金流/净利润"] = {"value": ratio, "unit": "", "note": f">1 说明利润有现金支撑，{safe}"}
+
+        results.append({"period": period, "metrics": m})
+
+    # === 成长性（需要多期计算增长率）===
+    if len(results) >= 2:
+        for i in range(len(results) - 1):
+            curr = results[i]
+            prev = results[i + 1]
+            cm = curr["metrics"]
+            pm = prev["metrics"]
+
+            # 营收增长率
+            if "营业总收入" not in cm:
+                rev_curr = _get_val(profit_df, next((j for j, v in enumerate(profit_df.iloc[:, 0].values) if str(v) == curr["period"]), None), ["营业总收入"])
+                rev_prev = _get_val(profit_df, next((j for j, v in enumerate(profit_df.iloc[:, 0].values) if str(v) == prev["period"]), None), ["营业总收入"])
+                if rev_curr and rev_prev and rev_prev != 0:
+                    cm["营收增长率"] = {"value": (rev_curr - rev_prev) / rev_prev * 100, "unit": "%", "note": "业务扩张速度"}
+
+            # 净利润增长率
+            np_curr = _get_val(profit_df, next((j for j, v in enumerate(profit_df.iloc[:, 0].values) if str(v) == curr["period"]), None), ["净利润"])
+            np_prev = _get_val(profit_df, next((j for j, v in enumerate(profit_df.iloc[:, 0].values) if str(v) == prev["period"]), None), ["净利润"])
+            if np_curr and np_prev and np_prev != 0:
+                cm["净利润增长率"] = {"value": (np_curr - np_prev) / np_prev * 100, "unit": "%", "note": "利润增长质量"}
+
+            # 扣非净利润增长率（尝试从08_主要财务指标.csv）
+            fi_path = "04_原始数据备份/08_主要财务指标.csv"
+            if os.path.exists(fi_path):
+                try:
+                    fi_df = pd.read_csv(fi_path, encoding="utf-8-sig")
+                    # 找到扣非净利润行
+                    kf_row = fi_df[fi_df["指标"].str.contains("扣非净利润", na=False)]
+                    if not kf_row.empty:
+                        date_cols = [c for c in fi_df.columns if re.match(r"^\d{8}$", str(c))]
+                        curr_col = next((c for c in date_cols if c == curr["period"]), None)
+                        prev_col = next((c for c in date_cols if c == prev["period"]), None)
+                        if curr_col and prev_col:
+                            kf_curr = float(kf_row.iloc[0][curr_col]) if pd.notna(kf_row.iloc[0][curr_col]) else None
+                            kf_prev = float(kf_row.iloc[0][prev_col]) if pd.notna(kf_row.iloc[0][prev_col]) else None
+                            if kf_curr and kf_prev and kf_prev != 0:
+                                cm["扣非净利润增长率"] = {"value": (kf_curr - kf_prev) / kf_prev * 100, "unit": "%", "note": "更真实，排除卖资产、政府补贴等一次性收益"}
+                except Exception:
+                    pass
+
+    return results
+
+
 # ============================
 # 3. 结构化深度分析生成
 # ============================
@@ -2204,6 +2347,135 @@ if key_fin:
             st.info("未获取到现金流量表数据。")
 else:
     st.info("未获取到财务三表数据（akshare 接口暂时不可用，且本地 CSV 未找到）。")
+
+# --- 财务分析指标（四大类） ---
+with st.spinner("正在计算财务分析指标..."):
+    fin_ratios = compute_financial_ratios(
+        fin_statements["balance"],
+        fin_statements["profit"],
+        fin_statements["cashflow"],
+    )
+
+if fin_ratios:
+    st.subheader("📈 财务分析指标")
+
+    # 指标分类
+    category_map = {
+        "盈利能力": ["毛利率", "净利率", "ROE", "ROA"],
+        "成长性": ["营收增长率", "净利润增长率", "扣非净利润增长率"],
+        "偿债能力": ["资产负债率", "流动比率", "速动比率", "有息负债率"],
+        "现金流": ["经营现金流净额", "自由现金流", "现金流/净利润"],
+    }
+
+    # 准备最近一期的数据
+    latest_period = fin_ratios[0]
+    latest_metrics = latest_period["metrics"]
+
+    # 展示四大类指标
+    analysis_tabs = st.tabs(["盈利能力", "成长性", "偿债能力", "现金流"])
+
+    with analysis_tabs[0]:
+        cols = st.columns(4)
+        for idx, name in enumerate(category_map["盈利能力"]):
+            with cols[idx]:
+                if name in latest_metrics:
+                    v = latest_metrics[name]
+                    st.markdown(f"**{name}**")
+                    st.markdown(f"<span style='font-size:22px;font-weight:bold'>{v['value']:.2f}{v['unit']}</span>", unsafe_allow_html=True)
+                    st.caption(f"💡 {v['note']}")
+                else:
+                    st.markdown(f"**{name}**")
+                    st.caption("数据不可用")
+        # 跨期分析备注
+        roe_vals = [r["metrics"]["ROE"]["value"] for r in fin_ratios if "ROE" in r["metrics"]]
+        if len(roe_vals) >= 5 and all(v > 15 for v in roe_vals[:5]):
+            st.success("ROE 连续5年 > 15% → 优秀公司")
+        gm_vals = [r["metrics"]["毛利率"]["value"] for r in fin_ratios if "毛利率" in r["metrics"]]
+        if len(gm_vals) >= 2:
+            trend = "稳定或提升" if gm_vals[0] >= gm_vals[1] * 0.98 else "下滑"
+            if trend == "稳定或提升":
+                st.info("毛利率稳定或提升 → 定价权强")
+            else:
+                st.warning("毛利率下滑 → 需关注定价能力变化")
+        if "毛利率" in latest_metrics and "净利率" in latest_metrics:
+            gap = latest_metrics["毛利率"]["value"] - latest_metrics["净利率"]["value"]
+            if gap > 30:
+                st.warning(f"毛利率与净利率差距 {gap:.1f}% → 费用控制可能不合理")
+            else:
+                st.info("毛利率与净利率差距合理 → 费用控制良好")
+
+    with analysis_tabs[1]:
+        cols = st.columns(3)
+        for idx, name in enumerate(category_map["成长性"]):
+            with cols[idx]:
+                if name in latest_metrics:
+                    v = latest_metrics[name]
+                    st.markdown(f"**{name}**")
+                    st.markdown(f"<span style='font-size:22px;font-weight:bold'>{v['value']:+.2f}{v['unit']}</span>", unsafe_allow_html=True)
+                    st.caption(f"💡 {v['note']}")
+                else:
+                    st.markdown(f"**{name}**")
+                    st.caption("数据不可用")
+        # 同步增长分析
+        rev_g = latest_metrics.get("营收增长率", {}).get("value")
+        np_g = latest_metrics.get("净利润增长率", {}).get("value")
+        if rev_g is not None and np_g is not None:
+            if abs(np_g - rev_g) < 15:
+                st.info("营收和利润同步增长 → 健康")
+            elif np_g > rev_g + 30:
+                st.warning("利润增长大幅快于营收增长 → 可能不可持续（降本增效有极限）")
+            else:
+                st.info("营收和利润增长存在差异 → 关注收入质量")
+
+    with analysis_tabs[2]:
+        cols = st.columns(4)
+        for idx, name in enumerate(category_map["偿债能力"]):
+            with cols[idx]:
+                if name in latest_metrics:
+                    v = latest_metrics[name]
+                    st.markdown(f"**{name}**")
+                    st.markdown(f"<span style='font-size:22px;font-weight:bold'>{v['value']:.2f}{v['unit']}</span>", unsafe_allow_html=True)
+                    st.caption(f"💡 {v['note']}")
+                else:
+                    st.markdown(f"**{name}**")
+                    st.caption("数据不可用")
+        # 趋势分析
+        debt_vals = [r["metrics"]["资产负债率"]["value"] for r in fin_ratios if "资产负债率" in r["metrics"]]
+        if len(debt_vals) >= 2 and debt_vals[0] < debt_vals[1]:
+            st.info("资产负债率逐年下降 → 财务更稳健")
+        elif len(debt_vals) >= 2 and debt_vals[0] > debt_vals[1]:
+            st.warning("资产负债率逐年上升 → 需关注偿债压力")
+
+    with analysis_tabs[3]:
+        cols = st.columns(3)
+        for idx, name in enumerate(category_map["现金流"]):
+            with cols[idx]:
+                if name in latest_metrics:
+                    v = latest_metrics[name]
+                    st.markdown(f"**{name}**")
+                    st.markdown(f"<span style='font-size:22px;font-weight:bold'>{v['value']:.2f}{v['unit']}</span>", unsafe_allow_html=True)
+                    st.caption(f"💡 {v['note']}")
+                else:
+                    st.markdown(f"**{name}**")
+                    st.caption("数据不可用")
+        # 现金流质量分析
+        op_vals = [r["metrics"]["经营现金流净额"]["value"] * 1e8 for r in fin_ratios if "经营现金流净额" in r["metrics"]]
+        np_vals_raw = []
+        for r in fin_ratios:
+            # 需要原始净利润（非格式化后的）
+            pl_idx = next((i for i, v in enumerate(fin_statements["profit"].iloc[:, 0].values) if str(v) == r["period"]), None)
+            if pl_idx is not None:
+                np_raw = fin_statements["profit"].iloc[pl_idx]["净利润"] if "净利润" in fin_statements["profit"].columns else None
+                if pd.notna(np_raw):
+                    try:
+                        np_vals_raw.append(float(np_raw))
+                    except:
+                        pass
+        if len(op_vals) >= 3 and len(np_vals_raw) >= 3:
+            if all(op > np_ for op, np_ in zip(op_vals[:3], np_vals_raw[:3])):
+                st.success("连续3年经营现金流 > 净利润 → 财务质量高")
+        if op_vals and np_vals_raw and op_vals[0] < 0 and np_vals_raw[0] > 0:
+            st.error("净利润高但经营现金流为负 → 危险！利润可能是纸面富贵")
 
 st.divider()
 
