@@ -282,7 +282,7 @@ def fetch_kline_from_baostock(stock_code: str, years: int = 8) -> pd.DataFrame:
 def plot_kline(df_kline: pd.DataFrame, stock_name: str = "", days: int | None = None,
                 flags: list[dict] | None = None, triangles: list[dict] | None = None,
                 show_ma: bool = True, show_boll: bool = False,
-                show_flags: bool = True) -> go.Figure:
+                show_flags: bool = True, show_triangles: bool = True) -> go.Figure:
     """使用 plotly 绘制 K 线图（含成交量），支持按天数缩放到最近范围，并标注旗形、三角形、均线、布林带"""
     if df_kline.empty:
         return go.Figure()
@@ -418,7 +418,7 @@ def plot_kline(df_kline: pd.DataFrame, stock_name: str = "", days: int | None = 
             )
 
     # 标注三角形收敛形态
-    if show_flags and triangles:
+    if show_triangles and triangles:
         for tri in triangles:
             tri_type = tri["type"]
             if tri_type == "对称三角形":
@@ -1512,10 +1512,12 @@ if search_clicked or True:
             st.session_state.show_boll = False
         if "show_flags" not in st.session_state:
             st.session_state.show_flags = False
+        if "show_triangles" not in st.session_state:
+            st.session_state.show_triangles = False
 
-        # 时间范围按钮（紧凑排列）
+        # 第一排：时间范围按钮
         st.markdown("<span style='font-size:12px;color:#666'>时间范围</span>", unsafe_allow_html=True)
-        btn_cols = st.columns([0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 10])
+        btn_cols = st.columns([0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 10])
         ranges = [
             (btn_cols[0], "5日", 5),
             (btn_cols[1], "10日", 10),
@@ -1533,13 +1535,14 @@ if search_clicked or True:
                     st.session_state.kline_days = days
                     st.rerun()
 
-        # 显示控制按钮
+        # 第二排：显示图层按钮（均线、布林带、旗形、三角形收敛）
         st.markdown("<span style='font-size:12px;color:#666'>显示图层</span>", unsafe_allow_html=True)
-        ctrl_cols = st.columns([0.7, 0.7, 0.7, 10])
+        ctrl_cols = st.columns([1.2, 1.2, 1.2, 1.2, 10])
         ctrl_items = [
             (ctrl_cols[0], "均线", "show_ma"),
             (ctrl_cols[1], "布林带", "show_boll"),
             (ctrl_cols[2], "旗形", "show_flags"),
+            (ctrl_cols[3], "三角形收敛", "show_triangles"),
         ]
         for col, label, state_key in ctrl_items:
             with col:
@@ -1550,7 +1553,7 @@ if search_clicked or True:
 
         # 形态检测（仅在开启时计算）
         flags = detect_flag_patterns(df_kline) if st.session_state.show_flags else []
-        triangles = detect_triangle_patterns(df_kline) if st.session_state.show_flags else []
+        triangles = detect_triangle_patterns(df_kline) if st.session_state.show_triangles else []
 
         fig_kline = plot_kline(
             df_kline,
@@ -1561,6 +1564,7 @@ if search_clicked or True:
             show_ma=st.session_state.show_ma,
             show_boll=st.session_state.show_boll,
             show_flags=st.session_state.show_flags,
+            show_triangles=st.session_state.show_triangles,
         )
         st.plotly_chart(fig_kline, use_container_width=True)
 
@@ -1590,7 +1594,8 @@ if search_clicked or True:
             else:
                 st.info("没有检测到旗形形态。")
 
-            # 三角形收敛形态检测展示
+        # 三角形收敛形态检测展示（仅在开启时显示）
+        if st.session_state.show_triangles:
             st.markdown("<span style='font-size:13px'>**🔺 三角形收敛形态检测**</span>", unsafe_allow_html=True)
             if triangles:
                 for tri in triangles:
